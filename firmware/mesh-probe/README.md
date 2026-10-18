@@ -3,6 +3,8 @@
 A one-evening experiment, run on 2026-10-18 on a XIAO ESP32S3 + Seeed Wio-WM6180
 (Morse Micro MM6108, module MAC 3c:1a:cc:4c:85:12).
 
+
+
 ## Question
 
 Linux + mac80211 runs 802.11s mesh on this chip (that is what OpenMANET and the HaLowLink

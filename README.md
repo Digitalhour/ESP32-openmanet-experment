@@ -12,6 +12,21 @@ this repository shows the recipe for the ESP32 side: three small hooks into the 
 extra chip command. See `firmware/halowmesh/README.md` for how it works and
 `firmware/mesh-probe/README.md` for the experiments that found it.
 
+## Who made this, and a warning
+
+I am a PHP and Python developer. I know very little about the ESP32, ESP-IDF, or the Morse
+Micro SDK. This project was built with Claude Fable 5.1 (Anthropic's AI model) doing the
+research, the firmware code and most of the documentation, while I ran the hardware, tested,
+and decided what to build next. Read the code with that in mind: it works on my two boards,
+on my desk, and that is the extent of the testing so far.
+
+Use at your own risk. This software is provided as is, with no warranty of any kind. I am
+not responsible for any damage, loss, or regulatory trouble that may come from using it.
+In particular: it drives a radio transmitter, so check your local rules for the 900 MHz band
+(the firmware is set up for the US channel plan), it talks to the HaLow chip in ways its
+vendor does not support, and it can reset or crash the chip and the board. If that worries
+you, do not flash it.
+
 ## Layout
 
 | Directory | What |
@@ -49,6 +64,8 @@ the build), a 2 A power supply per board for full power in the field.
 
 ## Credits and references
 
+- Claude Fable 5.1 (Anthropic): research, firmware and documentation, working with me in
+  Claude Code.
 - Morse Micro: the MM6108, morselib (microcontroller SDK, now published with source) and
   the open-source Linux driver whose command header provided the mesh command.
   https://github.com/MorseMicro

@@ -8,6 +8,9 @@ and relays frames for boards it cannot hear directly.
 Hardware: Seeed XIAO ESP32S3 + Seeed Wio-WM6180 Wi-Fi HaLow module (Morse Micro MM6108).
 Toolchain: ESP-IDF v5.4.4 and the `morsemicro/halow` component 2.11.2-esp32-2.
 
+Written with Claude Fable 5.1 by someone who is not an embedded developer; tested on two
+boards on a desk. Use at your own risk. See the warning in the top-level README.
+
 ## What is in here
 
 | File | Job |
