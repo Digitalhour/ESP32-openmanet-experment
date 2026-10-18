@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: 0BSD */
+/* SPDX-License-Identifier: 0BSD OR GPL-3.0-or-later */
 /*
  * HaLow mesh layer for the XIAO ESP32S3 + Wio-WM6180 (Morse Micro MM6108). See mesh.h.
  *

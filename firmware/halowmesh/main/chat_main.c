@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: 0BSD */
+/* SPDX-License-Identifier: 0BSD OR GPL-3.0-or-later */
 /*
  * HalowChat: a group chat over Wi-Fi HaLow.
  *

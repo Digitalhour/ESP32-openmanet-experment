@@ -34,6 +34,7 @@ you, do not flash it.
 | `firmware/halowmesh` | The mesh chat firmware. This is the one to flash. |
 | `firmware/mesh-probe` | The experiments: interface types, mesh beacons, over-the-air checks, peering frames, 4-address data. Each one documented with its result. |
 | `firmware/halowchat` | The earlier hub version (one board is a HaLow access point, the rest join). Works, kept as a fallback. |
+| `firmware/openmanet-gateway` | Will Shields' OpenMANET-XIAO-Gateway, imported with its full history (GPL-3.0). The XIAO as an OpenMANET gateway: phone hotspot, NAT, DNS forwarding, ATAK CoT multicast relay, web UI with login, OTA partitions. Being joined to the mesh layer; see below. |
 
 ## Status (2026-10-18)
 
@@ -84,12 +85,16 @@ data frames all work on the chip from the ESP32. This repository.
 **Step 2, done: our own mesh.** Flooding, duplicate suppression, learned routes, IP on top,
 chat on top of that. Works between two boards; relaying through a third is next to test.
 
-**Step 3: a Pi as the door, no changes to the XIAO.** An OpenMANET Pi could run a HaLow
-access point on the same radio next to its mesh interface. A XIAO joins that access point as
-a plain station (the hub firmware in `firmware/halowchat` already does this) and the Pi
-bridges it into the batman network like any other client. This is the quickest way to get a
-XIAO's traffic into an OpenMANET net, and it needs to be checked first: whether Morse's Linux
-driver allows mesh and access point on one radio at the same time.
+**Step 3: the gateway, joined to the mesh.** Will Shields' OpenMANET-XIAO-Gateway (now in
+`firmware/openmanet-gateway`) already does the XIAO side of an OpenMANET node: phone hotspot,
+NAT, DNS forwarding, an ATAK CoT multicast relay, a web UI with login, OTA partitions. It was
+designed to join a HaLow access point on a Pi, and its own research found the catch: no
+OpenMANET role exposes the Pi's HaLow radio as a plain access point, and a Pi with one HaLow
+HAT has only one radio, which is busy being a mesh point. Their notes call it a real gap in
+the ecosystem. Our mesh layer is the other way round that gap: the gateway's uplink becomes
+the mesh instead of a station link, so XIAOs form an ATAK-capable net among themselves now,
+and join the Pi's mesh once steps 4 to 6 land. The work: a `uplink_mesh` module in the
+gateway that wraps `mesh.c`, a third node role next to its client and relay roles.
 
 **Step 4: 802.11s peering.** The real handshake with a neighbour: Mesh Peering Open, Confirm
 and Close with link ids, timers and retries. The frames already fly; the state machine does
@@ -126,6 +131,12 @@ security, or the Morse Micro Linux driver.
 
 ## Credits and references
 
+- Will Shields (d3mocide) for OpenMANET-XIAO-Gateway, imported here with its full history:
+  https://github.com/d3mocide/OpenMANET-XIAO-Gateway. The phone hotspot, NAT, DNS forwarding,
+  ATAK CoT relay, web UI, provisioning and OTA work in `firmware/openmanet-gateway` is his
+  (built, as his commit log shows, with Claude as well), as is the research in his
+  `design/PI_SIDE.md` on what an OpenMANET Pi actually exposes. His project was found through
+  the fork at https://github.com/Yverr0y/OpenMANET-XIAO-Gateway.
 - Claude Fable 5.1 (Anthropic): research, firmware and documentation, working with me in
   Claude Code.
 - Morse Micro: the MM6108, morselib (microcontroller SDK, now published with source) and
@@ -136,11 +147,14 @@ security, or the Morse Micro Linux driver.
 
 ## Licence
 
-Everything we wrote here is 0BSD: free and open, with love for the community. Use it,
-copy it, change it, build on it, sell it, for anything. Credit is welcome, never required.
-See `LICENSE`.
+GPL-3.0-or-later for the repository as a whole. See `LICENSE`.
 
-The Morse Micro parts are theirs, not ours. The build fetches `morselib` (their SDK library,
-GPL-3.0-or-later or a commercial licence from Morse Micro) and their chip firmware (their
-binary distribution licence). This repository does not contain either. Follow Morse Micro's
-rules for those, especially if you redistribute built firmware.
+Why: `firmware/openmanet-gateway` is Will Shields' work under GPL-3.0, and the build pulls in
+Morse Micro's `morselib` (GPL-3.0-or-later or a commercial licence from Morse Micro) and their
+chip firmware (their binary distribution licence). This repository does not contain the Morse
+Micro parts; follow their rules for those, especially if you redistribute built firmware.
+
+The files we wrote ourselves (`firmware/halowmesh`, `firmware/mesh-probe`, `firmware/halowchat`,
+marked `SPDX-License-Identifier: 0BSD OR GPL-3.0-or-later`) are additionally offered under
+0BSD, see `LICENSES/0BSD.txt`: take those on their own for anything, no conditions, credit
+welcome and never required. Open with love for the community.
