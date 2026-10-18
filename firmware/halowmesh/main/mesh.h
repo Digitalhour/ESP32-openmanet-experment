@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * HaLow mesh layer for the XIAO ESP32S3 + Wio-WM6180 (Morse Micro MM6108).
  *

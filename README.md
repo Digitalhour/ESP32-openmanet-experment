@@ -72,9 +72,11 @@ the build), a 2 A power supply per board for full power in the field.
 - Seeed Studio: XIAO ESP32S3 and the Wio-WM6180 module.
 - Teapot Labs `mm-esp32-halow` for the bench power lessons on this board.
 
-## Licensing note
+## Licence
 
-`morselib`, the Morse Micro SDK library this firmware links against, is published under
-GPL-3.0-or-later (or a commercial licence from Morse Micro). The esp-halow wrapper is
-Apache-2.0. Code in this repository that links against morselib should be released under a
-GPL-compatible licence; pick one before publishing.
+GPL-3.0-or-later. See `LICENSE`.
+
+Why that one: `morselib`, the Morse Micro SDK library this firmware links against, is
+published under GPL-3.0-or-later (or a commercial licence from Morse Micro), and the
+esp-halow wrapper is Apache-2.0. A GPL-compatible licence for this code keeps the whole
+build consistent. The build fetches morselib itself; it is not part of this repository.
