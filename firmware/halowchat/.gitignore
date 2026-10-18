@@ -1,0 +1,6 @@
+build/
+build-soak/
+soak-logs/
+managed_components/
+sdkconfig
+sdkconfig.old

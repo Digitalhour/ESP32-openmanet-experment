@@ -1,0 +1,10 @@
+# ESP-IDF build output and fetched components
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+# Chip firmware image copied in for the Linux-image experiment
+firmware/*/mm6108.bin
+# Editors and OS
+.vscode/
+.DS_Store

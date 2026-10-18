@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>HalowChat</title>
+<style>
+  :root {
+    --bg: #f4f2ec; --card: #ffffff; --text: #1d1d1b; --muted: #6b6a64; --line: #e2dfd6;
+    --accent: #2f6f4f; --accent-text: #ffffff; --mine: #dcefe3; --theirs: #ffffff;
+    --good: #2e8b57; --warn: #b7791f; --bad: #b83b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151614; --card: #1f201d; --text: #ecebe6; --muted: #a09f98; --line: #33342f;
+      --accent: #5aa37c; --accent-text: #0f1a13; --mine: #243328; --theirs: #1f201d;
+      --good: #5cc28a; --warn: #e0a84a; --bad: #e07070;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+         font: 16px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--card);
+           display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  .pill { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; background: var(--muted); }
+  .pill.up { background: var(--good); } .pill.wait { background: var(--warn); } .pill.down { background: var(--bad); }
+  .sub { font-size: 12px; color: var(--muted); padding: 4px 14px; background: var(--card); border-bottom: 1px solid var(--line); }
+  #log { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 82%; padding: 8px 12px; border-radius: 14px; background: var(--theirs); border: 1px solid var(--line); }
+  .msg.mine { align-self: flex-end; background: var(--mine); }
+  .msg .who { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  .msg .text { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .msg .meta { font-size: 11px; color: var(--muted); margin-top: 3px; text-align: right; }
+  form { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--card); }
+  input, button { font: inherit; border-radius: 10px; padding: 10px 12px; border: 1px solid var(--line); }
+  input { flex: 1; background: var(--bg); color: var(--text); min-width: 0; }
+  button { background: var(--accent); color: var(--accent-text); border: 0; font-weight: 600; }
+  button:disabled { opacity: .55; }
+  #name { width: 110px; flex: none; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 10px; }
+  .peer-on { color: var(--good); } .peer-off { color: var(--muted); }
+  .err { color: var(--bad); font-size: 13px; padding: 4px 14px; background: var(--card); }
+  details { font-size: 13px; color: var(--muted); padding: 4px 14px; background: var(--card); }
+</style>
+</head>
+<body>
+<header>
+  <h1>HalowChat <span id="node" class="muted"></span></h1>
+  <span class="pill" id="state">…</span>
+</header>
+<div class="sub" id="sub">Loading…</div>
+<details><summary id="peers-summary">Peers</summary><div id="peers"></div><div id="radio"></div></details>
+<div id="log"></div>
+<div class="err" id="err" hidden></div>
+<form id="form">
+  <input id="name" placeholder="Your name" maxlength="24" autocomplete="off">
+  <input id="text" placeholder="Message" maxlength="200" autocomplete="off">
+  <button id="send">Send</button>
+</form>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let after = 0, myNode = "", peerNames = {};
+try { $("name").value = localStorage.getItem("halowchat-name") || ""; } catch (e) {}
+
+function when(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function render(m) {
+  const div = document.createElement("div");
+  div.className = "msg" + (m.mine ? " mine" : "");
+  div.dataset.id = m.id;
+  const who = document.createElement("div"); who.className = "who";
+  who.textContent = m.mine ? "You" : m.from + " · " + m.node;
+  const text = document.createElement("div"); text.className = "text"; text.textContent = m.text;
+  const meta = document.createElement("div"); meta.className = "meta";
+  div.append(who, text, meta);
+  $("log").appendChild(div);
+  updateMeta(div, m);
+}
+
+function updateMeta(div, m) {
+  const meta = div.querySelector(".meta");
+  const boards = (m.seen || []).length;
+  const read = m.read_by || [];
+  let state = "";
+  if (m.mine) state = read.length ? "seen by " + read.join(", ") : boards ? "delivered to " + boards + " board" + (boards > 1 ? "s" : "") : "not delivered yet";
+  meta.textContent = [when(m.ts), m.hops ? m.hops + " hop" + (m.hops > 1 ? "s" : "") : "", state].filter(Boolean).join(" · ");
+}
+
+let polling = false;
+async function poll() {
+  if (polling) return;   // overlapping refreshes on a slow link drew messages twice
+  polling = true;
+  try {
+    const viewer = encodeURIComponent($("name").value.trim());
+    const r = await fetch("/api/messages?after=" + after + "&name=" + viewer, { cache: "no-store" });
+    const j = await r.json();
+    const atBottom = $("log").scrollHeight - $("log").scrollTop - $("log").clientHeight < 60;
+    for (const m of j.messages) {
+      after = Math.max(after, m.serial);
+      if (!document.querySelector('.msg[data-id="' + m.id + '"]')) render(m);
+    }
+    if (j.messages.length && atBottom) $("log").scrollTop = $("log").scrollHeight;
+    // refresh "seen by" on everything we have
+    const r2 = await fetch("/api/messages?after=0&name=" + viewer, { cache: "no-store" });
+    const all = await r2.json();
+    for (const m of all.messages) {
+      const div = document.querySelector('.msg[data-id="' + m.id + '"]');
+      if (div) updateMeta(div, m);
+    }
+  } catch (e) {}
+  polling = false;
+}
+
+async function status() {
+  try {
+    const r = await fetch("/api/status", { cache: "no-store" });
+    const s = await r.json();
+    myNode = s.node;
+    $("node").textContent = "· " + s.node;
+    $("state").textContent = s.halow === "up" ? (s.role === "hub" ? "hub" : "joined") : s.role === "deciding" ? "starting" : "no link";
+    $("state").className = "pill " + (s.halow === "up" ? "up" : s.role === "deciding" ? "wait" : "down");
+    $("sub").textContent = `${s.name} · HaLow ${s.freq_mhz ? s.freq_mhz.toFixed(1) + " MHz" : ""}` +
+      (s.rssi !== undefined ? ` · signal ${s.rssi} dBm` : "") + ` · TX cap ${s.tx_dbm || "max"} dBm`;
+    if (!$("name").value && s.name) $("name").value = s.name;
+    const box = $("peers"); box.textContent = "";
+    peerNames = {};
+    let online = 0;
+    for (const p of s.peers) {
+      peerNames[p.node] = p.name;
+      const on = p.last_seen_s < 60;
+      if (on) online++;
+      const d = document.createElement("div");
+      d.className = on ? "peer-on" : "peer-off";
+      d.textContent = `${on ? "●" : "○"} ${p.name || p.node} (${p.node}) · ${on ? "online" : "last heard " + p.last_seen_s + " s ago"}`;
+      box.appendChild(d);
+    }
+    $("peers-summary").textContent = `Peers online: ${online} of ${s.peers.length} · this board: ${s.role} · boots ${s.boots}`;
+    $("radio").textContent = "";
+  } catch (e) {
+    $("state").textContent = "no board"; $("state").className = "pill down";
+  }
+}
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const name = $("name").value.trim();
+  const text = $("text").value.trim();
+  if (!name) { $("err").textContent = "Enter your name first."; $("err").hidden = false; $("name").focus(); return; }
+  if (!text) return;
+  try { localStorage.setItem("halowchat-name", name); } catch (e) {}
+  $("send").disabled = true;
+  try {
+    const r = await fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, text, ts: Date.now() }) });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "Send failed");
+    $("text").value = "";
+    $("err").hidden = true;
+    await poll();
+    $("log").scrollTop = $("log").scrollHeight;
+  } catch (e) {
+    $("err").textContent = e.message; $("err").hidden = false;
+  }
+  $("send").disabled = false;
+  $("text").focus();
+});
+
+status(); poll();
+setInterval(poll, 1500);
+setInterval(status, 5000);
+</script>
+</body>
+</html>

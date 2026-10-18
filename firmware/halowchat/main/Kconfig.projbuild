@@ -1,0 +1,82 @@
+menu "HalowChat"
+
+    config CHAT_HALOW_SSID
+        string "HaLow network name"
+        default "HalowChat"
+        help
+            Every board scans for this network at boot and joins it, or starts it
+            if nobody has.
+
+    config CHAT_HALOW_PSK
+        string "HaLow passphrase (WPA3-SAE)"
+        default "change-me-please"
+
+    config CHAT_S1G_CHANNEL
+        int "HaLow channel (S1G channel number)"
+        range 1 51
+        default 26
+        help
+            The one channel the whole network uses. 26 = 915 MHz, 2 MHz wide.
+            US channels sit at 902 + 0.5 x N MHz.
+
+    config CHAT_S1G_OPCLASS
+        int "HaLow operating class"
+        range 68 71
+        default 69
+        help
+            68 = 1 MHz, 69 = 2 MHz, 70 = 4 MHz, 71 = 8 MHz.
+
+    config CHAT_HALOW_MAX_TX_DBM
+        int "Cap HaLow TX power (dBm, 0 = regulatory maximum)"
+        range 0 30
+        default 8
+        help
+            Keep it low on the desk: boards a few feet apart overload each other,
+            and weak USB ports can't feed full power. Changeable from the page.
+
+    config CHAT_ROLE
+        int "Role (0 = auto, 1 = always the hub, 2 = always a member)"
+        range 0 2
+        default 0
+        help
+            Auto: scan for the network and join it, or start it if nobody has. Pin a
+            board as the hub when its power supply can't handle the station's scan
+            probes (see the Ottercam bridge README). Changeable from the page.
+
+    config CHAT_WIFI_PSK
+        string "Phone hotspot password (WPA2, 8+ characters)"
+        default "halowchat"
+        help
+            Each board's hotspot is named HalowChat-XXXX from its own address.
+
+    config CHAT_WIFI_CHANNEL
+        int "Phone hotspot channel"
+        range 1 11
+        default 6
+
+    config CHAT_WEB_PORT
+        int "Web page port"
+        range 1 65535
+        default 80
+
+    config CHAT_UDP_PORT
+        int "Chat UDP port on the HaLow network"
+        range 1024 65535
+        default 4242
+
+    config CHAT_HALOW_SPI_MAX_HZ
+        int "Cap the HaLow SPI clock (Hz)"
+        range 1000000 50000000
+        default 40000000
+
+    config CHAT_HALOW_RESET_HOLD_MS
+        int "Hold the HaLow chip in reset this long (ms)"
+        range 5 20000
+        default 8000
+
+    config CHAT_HALOW_RESET_SETTLE_MS
+        int "HaLow chip boot time after reset (ms)"
+        range 20 2000
+        default 250
+
+endmenu

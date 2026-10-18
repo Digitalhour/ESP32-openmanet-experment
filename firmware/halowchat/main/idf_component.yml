@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.4.4,<6.0"
+  morsemicro/halow:
+    version: "^2.11.2-esp32-2"

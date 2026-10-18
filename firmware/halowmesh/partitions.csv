@@ -1,0 +1,5 @@
+# HalowChat: a bigger NVS partition for the saved chat history.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  64K,
+phy_init, data, phy,     0x19000, 4K,
+factory,  app,  factory, 0x20000, 3M,
