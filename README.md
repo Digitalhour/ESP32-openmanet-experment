@@ -74,10 +74,11 @@ the build), a 2 A power supply per board for full power in the field.
 
 ## Licence
 
-0BSD. Free and open source. Use it, copy it, change it, sell it, for anything, with no
-conditions. Credit is appreciated but not required. See `LICENSE`.
+Everything we wrote here is 0BSD: free and open, with love for the community. Use it,
+copy it, change it, build on it, sell it, for anything. Credit is welcome, never required.
+See `LICENSE`.
 
-One thing to know if you redistribute built firmware: the build fetches `morselib`, Morse
-Micro's SDK library, which is GPL-3.0-or-later (or a commercial licence from Morse Micro).
-That library's terms apply to the combined binary. The code in this repository itself is
-0BSD, which is compatible with that, and the repository does not contain morselib.
+The Morse Micro parts are theirs, not ours. The build fetches `morselib` (their SDK library,
+GPL-3.0-or-later or a commercial licence from Morse Micro) and their chip firmware (their
+binary distribution licence). This repository does not contain either. Follow Morse Micro's
+rules for those, especially if you redistribute built firmware.
