@@ -137,7 +137,9 @@ that code exist in the SDK tree uncompiled (`mesh_rsn.c`, `mesh_mpm.c`) but are 
 against Linux driver calls. Weeks of careful crypto plumbing, and the step that lets a XIAO
 peer with a real OpenMANET node at the radio layer.
 
-**Step 6: batman-adv on the ESP32, if possible.** Peering gets a XIAO heard; batman-adv gets
+**Step 6: batman-adv on the ESP32, if possible.** (Researched in detail:
+`docs/batman-adv-on-esp32.md`, with the wire format, what a minimal node must do, and a
+test plan that needs no Pi.) Peering gets a XIAO heard; batman-adv gets
 it understood. Everything OpenMANET sends rides inside batman-adv frames (ethertype 0x4305):
 ELP hellos every half second, OGMv2 route announcements, translation tables with checksums
 that say which client addresses sit behind which node, and its own unicast and broadcast
