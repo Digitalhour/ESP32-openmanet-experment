@@ -74,9 +74,10 @@ the build), a 2 A power supply per board for full power in the field.
 
 ## Licence
 
-GPL-3.0-or-later. See `LICENSE`.
+0BSD. Free and open source. Use it, copy it, change it, sell it, for anything, with no
+conditions. Credit is appreciated but not required. See `LICENSE`.
 
-Why that one: `morselib`, the Morse Micro SDK library this firmware links against, is
-published under GPL-3.0-or-later (or a commercial licence from Morse Micro), and the
-esp-halow wrapper is Apache-2.0. A GPL-compatible licence for this code keeps the whole
-build consistent. The build fetches morselib itself; it is not part of this repository.
+One thing to know if you redistribute built firmware: the build fetches `morselib`, Morse
+Micro's SDK library, which is GPL-3.0-or-later (or a commercial licence from Morse Micro).
+That library's terms apply to the combined binary. The code in this repository itself is
+0BSD, which is compatible with that, and the repository does not contain morselib.

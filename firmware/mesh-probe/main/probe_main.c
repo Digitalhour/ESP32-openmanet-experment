@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* SPDX-License-Identifier: 0BSD */
 /*
  * Mesh probes for the Seeed Wio-WM6180 (Morse Micro MM6108) on a XIAO ESP32S3.
  *
