@@ -17,3 +17,4 @@ target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_mmdrv_add_if"
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_umac_ap_get_beacon")
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_mmdrv_host_process_rx_frame")
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_mmdrv_tx_frame")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_umac_rc_init_rate_table_mgmt")

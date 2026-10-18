@@ -34,6 +34,7 @@
 
 #include "mmhalow.h"
 #include "mmpkt.h"
+#include "mmrc.h"
 
 #include "mesh.h"
 
@@ -65,6 +66,7 @@ static const char *TAG = "mesh";
 #define ROUTE_STALE_US (30 * 1000000LL)
 #define MAX_FRAME 1600
 #define PKT_CLASS_DATA_TID0 0
+#define RATE_ADAPT 1        /* 0: every frame at MCS0 like morselib's management frames */
 
 /* 802.11 frame layout used here: QoS data, To DS + From DS, four addresses, Mesh Control. */
 #define HDR_LEN 32          /* fc 2, duration 2, a1 6, a2 6, a3 6, seq 2, a4 6, qos 2 */
@@ -127,6 +129,7 @@ enum mmwlan_status __real_mmint_mmdrv_add_if(uint16_t *vif_id, const uint8_t *ad
 struct mmpkt *__real_mmint_umac_ap_get_beacon(struct umac_data *umacd);
 void __real_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t channel);
 enum mmwlan_status __real_mmint_mmdrv_tx_frame(struct mmpkt *mmpkt, bool is_mgmt);
+void __real_mmint_umac_rc_init_rate_table_mgmt(struct umac_data *umacd, struct mmrc_rate_table *table, bool rts_required);
 struct umac_data *mmint_umac_data_get_umacd(void);
 struct mmpkt *mmint_umac_datapath_alloc_raw_tx_mmpkt(uint8_t pkt_class, uint32_t space_at_start, uint32_t space_at_end);
 enum mmwlan_status mmint_umac_datapath_tx_mgmt_frame_ap(struct umac_data *umacd, struct mmpkt *txbuf,
@@ -144,6 +147,7 @@ static uint16_t s_mesh_vif = VIF_ID_INVALID;
 static volatile bool s_force_mesh_vif;
 static volatile bool s_patch_mesh_id;
 static struct mmpkt *s_data_pkt_in_flight;
+static int16_t s_tx_rssi_hint;   /* RSSI of the next hop for the frame in flight, INT16_MIN for broadcast */
 static char s_fw_version[32];
 static const struct mmwlan_s1g_channel *s_channel;
 
@@ -354,6 +358,43 @@ enum mmwlan_status __wrap_mmint_mmdrv_tx_frame(struct mmpkt *mmpkt, bool is_mgmt
     return __real_mmint_mmdrv_tx_frame(mmpkt, is_mgmt);
 }
 
+/* Morselib's management transmit helper picks MCS0 for everything. For our unicast data frames,
+ * start higher when the next hop's beacons are strong, and fall back down the chain. */
+static enum mmrc_bw channel_bw(void)
+{
+    uint8_t bw = s_channel != NULL ? s_channel->bw_mhz : 2;
+    return bw == 1 ? MMRC_BW_1MHZ : bw == 4 ? MMRC_BW_4MHZ : bw == 8 ? MMRC_BW_8MHZ : MMRC_BW_2MHZ;
+}
+
+void __wrap_mmint_umac_rc_init_rate_table_mgmt(struct umac_data *umacd, struct mmrc_rate_table *table, bool rts_required)
+{
+    if (!RATE_ADAPT || s_data_pkt_in_flight == NULL || s_tx_rssi_hint == INT16_MIN)
+    {
+        __real_mmint_umac_rc_init_rate_table_mgmt(umacd, table, rts_required);
+        return;
+    }
+    int16_t rssi = s_tx_rssi_hint;
+    uint8_t top = rssi >= -55 ? MMRC_MCS5 : rssi >= -62 ? MMRC_MCS4 : rssi >= -70 ? MMRC_MCS3 : rssi >= -78 ? MMRC_MCS2 : rssi >= -86 ? MMRC_MCS1 : MMRC_MCS0;
+    uint8_t mid = top >= 2 ? top - 2 : MMRC_MCS0;
+    const uint8_t chain[3] = { top, mid, MMRC_MCS0 };
+    const uint8_t attempts[3] = { 2, 2, 3 };
+    memset(table, 0, sizeof(*table));
+    for (int i = 0; i < 3; i++)
+    {
+        table->rates[i].rate = chain[i];
+        table->rates[i].attempts = attempts[i];
+        table->rates[i].bw = channel_bw();
+        table->rates[i].guard = MMRC_GUARD_LONG;
+        table->rates[i].ss = MMRC_SPATIAL_STREAM_1;
+        table->rates[i].flags = 0;
+    }
+    table->rates[3].rate = MMRC_MCS_UNUSED;
+    if (top < 8)
+    {
+        s_stats.tx_by_mcs[top]++;
+    }
+}
+
 /* ---------- Tables ---------- */
 
 static void neighbour_heard(const uint8_t *addr, int16_t rssi)
@@ -388,6 +429,24 @@ static void neighbour_heard(const uint8_t *addr, int16_t rssi)
     slot->last_seen_us = now;
     s_stats.beacons_heard++;
     xSemaphoreGive(s_lock);
+}
+
+static int16_t neighbour_rssi(const uint8_t *addr)
+{
+    int16_t rssi = INT16_MIN;
+    int64_t now = esp_timer_get_time();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < MAX_NEIGHBOURS; i++)
+    {
+        if (s_neighbours[i].beacons != 0 && mac_eq(s_neighbours[i].addr, addr) &&
+            now - s_neighbours[i].last_seen_us < NEIGHBOUR_TIMEOUT_US)
+        {
+            rssi = s_neighbours[i].rssi;
+            break;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    return rssi;
 }
 
 /* A frame from SA came in via TA: TA is a next hop towards SA, hops away. */
@@ -527,6 +586,7 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
     memcpy(&p[46], payload, payload_len);
     mmpkt_close(&view);
 
+    s_tx_rssi_hint = (ra[0] & 1) ? INT16_MIN : neighbour_rssi(ra);
     s_data_pkt_in_flight = pkt;
     enum mmwlan_status st = mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
     s_data_pkt_in_flight = NULL;

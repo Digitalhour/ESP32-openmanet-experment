@@ -47,7 +47,10 @@ you, do not flash it.
   out of range of the first).
 - Not implemented: 802.11s peering, HWMP path selection, encryption. The mesh is open and
   uses flooding with a hop limit, duplicate suppression and routes learned from traffic.
-- Throughput is whatever the lowest HaLow rate gives (chat is fine, video is not).
+- Photos work and double as a speed test: a 300 KB photo crosses from one board to the
+  other in about 5 s, roughly 500 kbit/s on the desk at a 2 MHz channel. Unicast frames
+  pick their rate from the neighbour's signal strength; without that it was 130 to
+  200 kbit/s. Chat and photos are fine, video is not.
 
 ## Quick start
 

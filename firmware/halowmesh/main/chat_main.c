@@ -20,12 +20,14 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "cJSON.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -64,6 +66,11 @@ static const char *TAG = "halowchat";
 
 #define RESET_HISTORY_LEN 10
 
+#define MAX_PHOTOS      6
+#define MAX_PHOTO_BYTES (400 * 1024)
+#define HISTORY_VERSION 2
+#define PHOTO_SELFTEST  0   /* 1: node F034 announces test photos after boot, a transfer speed test */
+
 
 #define CONNECTED_BIT BIT0
 
@@ -84,7 +91,30 @@ typedef struct
     bool read_ack_sent;      /* this board's page has shown it and said so */
     uint8_t retries;         /* our own messages: resends so far */
     int64_t sent_us;         /* our own messages: when last sent */
+    char photo[16];          /* photo id, empty for text messages */
+    char photo_type[32];     /* its content type */
+    uint32_t photo_bytes;
+    uint32_t fetch_ms;       /* how long this board took to pull it over the mesh */
+    bool photo_ready;        /* this board has the bytes */
 } message_t;
+
+typedef struct
+{
+    bool used;
+    char id[16];
+    char type[32];
+    uint8_t *data;           /* in PSRAM */
+    size_t len;
+    int sending;             /* readers in flight; not evicted while > 0 */
+} photo_t;
+
+typedef struct
+{
+    char id[16];
+    char ip[16];
+    char type[32];
+    uint32_t bytes;
+} fetch_job_t;
 
 typedef struct
 {
@@ -121,6 +151,9 @@ static char s_seen_ids[MAX_SEEN_IDS][24];
 static size_t s_seen_next;
 static SemaphoreHandle_t s_lock;
 static int s_sock = -1;
+static photo_t s_photos[MAX_PHOTOS];
+static size_t s_photo_next;
+static QueueHandle_t s_fetch_queue;
 
 extern const char chat_ui_html_start[] asm("_binary_chat_ui_html_start");
 extern const char chat_ui_html_end[] asm("_binary_chat_ui_html_end");
@@ -369,6 +402,7 @@ static void save_history(void)
     size_t n = s_message_count < SAVED_MESSAGES ? s_message_count : SAVED_MESSAGES;
     const message_t *first = &s_messages[s_message_count - n];
     nvs_set_blob(nvs, "history", first, n * sizeof(message_t));
+    nvs_set_u32(nvs, "hver", HISTORY_VERSION);
     nvs_set_u32(nvs, "seq", s_next_seq);
     nvs_commit(nvs);
     nvs_close(nvs);
@@ -382,13 +416,16 @@ static void load_history(void)
         return;
     }
     size_t len = SAVED_MESSAGES * sizeof(message_t);
-    if (nvs_get_blob(nvs, "history", s_messages, &len) == ESP_OK && len % sizeof(message_t) == 0)
+    uint32_t hver = 0;
+    nvs_get_u32(nvs, "hver", &hver);
+    if (hver == HISTORY_VERSION && nvs_get_blob(nvs, "history", s_messages, &len) == ESP_OK && len % sizeof(message_t) == 0)
     {
         s_message_count = len / sizeof(message_t);
         for (size_t i = 0; i < s_message_count; i++)
         {
             s_messages[i].serial = s_next_serial++;
             s_messages[i].retries = RETRY_MAX; /* never resend old messages */
+            s_messages[i].photo_ready = false; /* photo bytes don't survive a reboot */
             seen_before(s_messages[i].id);
         }
         ESP_LOGI(TAG, "Restored %u message(s)", (unsigned)s_message_count);
@@ -402,6 +439,202 @@ static void load_history(void)
 }
 
 static void my_ip_string(char *out, size_t size);
+
+/* ---------- Photos ---------- */
+
+static message_t *find_message(const char *id)
+{
+    for (size_t i = 0; i < s_message_count; i++)
+    {
+        if (strcmp(s_messages[i].id, id) == 0)
+        {
+            return &s_messages[i];
+        }
+    }
+    return NULL;
+}
+
+/* Caller holds s_lock. */
+static photo_t *photo_find(const char *id)
+{
+    for (size_t i = 0; i < MAX_PHOTOS; i++)
+    {
+        if (s_photos[i].used && strcmp(s_photos[i].id, id) == 0)
+        {
+            return &s_photos[i];
+        }
+    }
+    return NULL;
+}
+
+/* Caller holds s_lock. Takes ownership of data. Evicts the oldest photo nobody is reading. */
+static photo_t *photo_store(const char *id, const char *type, uint8_t *data, size_t len)
+{
+    photo_t *p = photo_find(id);
+    if (p == NULL)
+    {
+        for (size_t tries = 0; tries < MAX_PHOTOS; tries++)
+        {
+            photo_t *cand = &s_photos[s_photo_next];
+            s_photo_next = (s_photo_next + 1) % MAX_PHOTOS;
+            if (!cand->used || cand->sending == 0)
+            {
+                p = cand;
+                break;
+            }
+        }
+        if (p == NULL)
+        {
+            free(data);
+            return NULL;
+        }
+    }
+    if (p->used)
+    {
+        free(p->data);
+        message_t *old = find_message(p->id);
+        if (old != NULL && strcmp(old->id, id) != 0)
+        {
+            old->photo_ready = false;
+        }
+    }
+    p->used = true;
+    strlcpy(p->id, id, sizeof(p->id));
+    strlcpy(p->type, type, sizeof(p->type));
+    p->data = data;
+    p->len = len;
+    p->sending = 0;
+    return p;
+}
+
+static void add_photo_fields(cJSON *packet, const message_t *m)
+{
+    if (m->photo[0] != '\0')
+    {
+        cJSON_AddStringToObject(packet, "photo", m->photo);
+        cJSON_AddStringToObject(packet, "type", m->photo_type);
+        cJSON_AddNumberToObject(packet, "bytes", m->photo_bytes);
+    }
+}
+
+static void send_packet(cJSON *packet);
+static void my_ip_string(char *out, size_t size);
+
+/* A photo from this board's phone: keep it, announce it; other boards come and fetch it. */
+static void announce_photo(const char *name, const char *type, uint8_t *data, size_t len, int64_t ts_ms)
+{
+    char id[16];
+    snprintf(id, sizeof(id), "%s-%" PRIu32, s_node, s_next_seq++);
+    char text[48];
+    snprintf(text, sizeof(text), "Photo, %u KB", (unsigned)((len + 512) / 1024));
+    char ip[16];
+    my_ip_string(ip, sizeof(ip));
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    seen_before(id);
+    if (photo_store(id, type, data, len) == NULL)
+    {
+        xSemaphoreGive(s_lock);
+        ESP_LOGW(TAG, "No room for a new photo right now");
+        return;
+    }
+    message_t *m = store_message(id, s_node, name, text, ts_ms, 0);
+    strlcpy(m->photo, id, sizeof(m->photo));
+    strlcpy(m->photo_type, type, sizeof(m->photo_type));
+    m->photo_bytes = len;
+    m->photo_ready = true;
+    m->sent_us = esp_timer_get_time();
+    save_history();
+    message_t copy = *m;
+    xSemaphoreGive(s_lock);
+
+    cJSON *p = cJSON_CreateObject();
+    cJSON_AddStringToObject(p, "t", "msg");
+    cJSON_AddStringToObject(p, "id", id);
+    cJSON_AddStringToObject(p, "node", s_node);
+    cJSON_AddStringToObject(p, "from", name);
+    cJSON_AddStringToObject(p, "text", text);
+    cJSON_AddNumberToObject(p, "ts", (double)ts_ms);
+    cJSON_AddStringToObject(p, "ip", ip);
+    cJSON_AddNumberToObject(p, "hops", 0);
+    add_photo_fields(p, &copy);
+    send_packet(p);
+    cJSON_Delete(p);
+    ESP_LOGI(TAG, "Photo %s announced: %u KB", id, (unsigned)(len / 1024));
+}
+
+/* Pulls announced photos from the board that has them, over the mesh, and times it. */
+static void fetch_task(void *arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        fetch_job_t job;
+        if (xQueueReceive(s_fetch_queue, &job, portMAX_DELAY) != pdTRUE)
+        {
+            continue;
+        }
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            char url[80];
+            snprintf(url, sizeof(url), "http://%s/api/photo/%s", job.ip, job.id);
+            esp_http_client_config_t c = { .url = url, .timeout_ms = 60000, .buffer_size = 4096 };
+            esp_http_client_handle_t h = esp_http_client_init(&c);
+            if (h == NULL)
+            {
+                break;
+            }
+            int64_t t0 = esp_timer_get_time();
+            uint8_t *buf = NULL;
+            size_t got = 0;
+            int64_t clen = -1;
+            if (esp_http_client_open(h, 0) == ESP_OK)
+            {
+                clen = esp_http_client_fetch_headers(h);
+                int status = esp_http_client_get_status_code(h);
+                if (status == 200 && clen > 0 && clen <= MAX_PHOTO_BYTES)
+                {
+                    buf = heap_caps_malloc((size_t)clen, MALLOC_CAP_SPIRAM);
+                    if (buf == NULL)
+                    {
+                        buf = malloc((size_t)clen);
+                    }
+                    while (buf != NULL && got < (size_t)clen)
+                    {
+                        int r = esp_http_client_read(h, (char *)buf + got, (size_t)clen - got);
+                        if (r <= 0)
+                        {
+                            break;
+                        }
+                        got += (size_t)r;
+                    }
+                }
+            }
+            esp_http_client_close(h);
+            esp_http_client_cleanup(h);
+            uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+            if (buf != NULL && clen > 0 && got == (size_t)clen)
+            {
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                photo_store(job.id, job.type, buf, got);
+                message_t *m = find_message(job.id);
+                if (m != NULL)
+                {
+                    m->photo_ready = true;
+                    m->fetch_ms = ms;
+                }
+                xSemaphoreGive(s_lock);
+                ESP_LOGI(TAG, "Photo %s: %u KB from %s in %lu ms (%lu kbit/s), attempt %d", job.id, (unsigned)(got / 1024),
+                         job.ip, (unsigned long)ms, (unsigned long)(got * 8 / (ms ? ms : 1)), attempt);
+                break;
+            }
+            free(buf);
+            ESP_LOGW(TAG, "Photo %s: fetch from %s failed (got %u of %ld bytes in %lu ms), attempt %d", job.id, job.ip,
+                     (unsigned)got, (long)clen, (unsigned long)ms, attempt);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+    }
+}
 
 /* ---------- HaLow transport: UDP broadcast flooding ---------- */
 
@@ -567,10 +800,27 @@ static void handle_packet(const char *data, size_t len, const char *from_ip)
         {
             xSemaphoreTake(s_lock, portMAX_DELAY);
             bool dup = seen_before(id->valuestring);
+            fetch_job_t job = { 0 };
+            bool fetch = false;
             if (!dup)
             {
-                store_message(id->valuestring, node->valuestring, from->valuestring, text->valuestring,
-                              cJSON_IsNumber(ts) ? (int64_t)ts->valuedouble : 0, (uint8_t)hop_count);
+                message_t *m = store_message(id->valuestring, node->valuestring, from->valuestring, text->valuestring,
+                                             cJSON_IsNumber(ts) ? (int64_t)ts->valuedouble : 0, (uint8_t)hop_count);
+                const cJSON *photo = cJSON_GetObjectItem(p, "photo");
+                const cJSON *ptype = cJSON_GetObjectItem(p, "type");
+                const cJSON *bytes = cJSON_GetObjectItem(p, "bytes");
+                if (cJSON_IsString(photo) && strlen(photo->valuestring) < sizeof(m->photo))
+                {
+                    strlcpy(m->photo, photo->valuestring, sizeof(m->photo));
+                    strlcpy(m->photo_type, cJSON_IsString(ptype) ? ptype->valuestring : "image/jpeg", sizeof(m->photo_type));
+                    m->photo_bytes = cJSON_IsNumber(bytes) ? (uint32_t)bytes->valuedouble : 0;
+                    m->photo_ready = false;
+                    strlcpy(job.id, m->photo, sizeof(job.id));
+                    strlcpy(job.ip, cJSON_IsString(ip) ? ip->valuestring : from_ip, sizeof(job.ip));
+                    strlcpy(job.type, m->photo_type, sizeof(job.type));
+                    job.bytes = m->photo_bytes;
+                    fetch = true;
+                }
                 note_peer(node->valuestring, from->valuestring);
                 if (cJSON_IsString(ip))
                 {
@@ -579,6 +829,10 @@ static void handle_packet(const char *data, size_t len, const char *from_ip)
                 save_history();
             }
             xSemaphoreGive(s_lock);
+            if (fetch && xQueueSend(s_fetch_queue, &job, 0) != pdTRUE)
+            {
+                ESP_LOGW(TAG, "Photo %s: fetch queue full", job.id);
+            }
             if (!dup)
             {
                 ESP_LOGI(TAG, "Message from %s (%s) via %s, %d hop(s): %s",
@@ -743,6 +997,7 @@ static void udp_task(void *arg)
                 cJSON_AddStringToObject(resend, "text", m->text);
                 cJSON_AddNumberToObject(resend, "ts", (double)m->ts_ms);
                 cJSON_AddNumberToObject(resend, "hops", 0);
+                add_photo_fields(resend, m);
             }
         }
         xSemaphoreGive(s_lock);
@@ -1092,6 +1347,14 @@ static esp_err_t messages_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(j, "ts", (double)m->ts_ms);
         cJSON_AddNumberToObject(j, "hops", m->hops);
         cJSON_AddBoolToObject(j, "mine", strcmp(m->node, s_node) == 0);
+        if (m->photo[0] != '\0')
+        {
+            cJSON_AddStringToObject(j, "photo", m->photo);
+            cJSON_AddStringToObject(j, "photo_type", m->photo_type);
+            cJSON_AddNumberToObject(j, "photo_bytes", m->photo_bytes);
+            cJSON_AddBoolToObject(j, "photo_ready", m->photo_ready);
+            cJSON_AddNumberToObject(j, "fetch_ms", m->fetch_ms);
+        }
         cJSON *seen = cJSON_AddArrayToObject(j, "seen");
         for (uint8_t k = 0; k < m->seen_count; k++)
         {
@@ -1153,6 +1416,155 @@ static esp_err_t send_handler(httpd_req_t *req)
     return send_json(req, root);
 }
 
+static void url_decode(char *str)
+{
+    char *out = str;
+    for (const char *in = str; *in != '\0'; in++)
+    {
+        if (*in == '+')
+        {
+            *out++ = ' ';
+        }
+        else if (*in == '%' && in[1] != '\0' && in[2] != '\0')
+        {
+            char hex[3] = { in[1], in[2], '\0' };
+            *out++ = (char)strtol(hex, NULL, 16);
+            in += 2;
+        }
+        else
+        {
+            *out++ = *in;
+        }
+    }
+    *out = '\0';
+}
+
+/* POST /api/photo?name=...&ts=... with the image as the body. Kept in PSRAM, announced to the mesh. */
+static esp_err_t photo_upload_handler(httpd_req_t *req)
+{
+    size_t len = req->content_len;
+    if (len == 0 || len > MAX_PHOTO_BYTES)
+    {
+        return send_error(req, "413 Payload Too Large", "Photo must be under 400 KB");
+    }
+    char query[160], name[MAX_NAME * 3 + 1] = "", tsv[24] = "";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        httpd_query_key_value(query, "name", name, sizeof(name));
+        httpd_query_key_value(query, "ts", tsv, sizeof(tsv));
+    }
+    url_decode(name);
+    char type[32] = "image/jpeg";
+    httpd_req_get_hdr_value_str(req, "Content-Type", type, sizeof(type));
+    if (s_halow_ip == 0 || !(xEventGroupGetBits(s_events) & CONNECTED_BIT))
+    {
+        return send_error(req, "503 Service Unavailable", "The mesh isn't up yet");
+    }
+    uint8_t *buf = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (buf == NULL)
+    {
+        buf = malloc(len);
+    }
+    if (buf == NULL)
+    {
+        return send_error(req, "507 Insufficient Storage", "Out of memory");
+    }
+    size_t got = 0;
+    while (got < len)
+    {
+        int r = httpd_req_recv(req, (char *)buf + got, len - got);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT)
+        {
+            continue;
+        }
+        if (r <= 0)
+        {
+            free(buf);
+            return send_error(req, "400 Bad Request", "Upload stopped early");
+        }
+        got += (size_t)r;
+    }
+    if (name[0] != '\0' && strlen(name) <= MAX_NAME && strcmp(name, s_name) != 0)
+    {
+        strlcpy(s_name, name, sizeof(s_name));
+        save_settings();
+    }
+    announce_photo(s_name, type, buf, len, tsv[0] ? (int64_t)strtoll(tsv, NULL, 10) : 0);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    return send_json(req, root);
+}
+
+/* GET /api/photo/<id>: the bytes, for this board's phone and for other boards. */
+static esp_err_t photo_get_handler(httpd_req_t *req)
+{
+    const char *tail = req->uri + strlen("/api/photo/");
+    char id[16];
+    size_t n = strcspn(tail, "?");
+    if (n == 0 || n >= sizeof(id))
+    {
+        return send_error(req, "404 Not Found", "No such photo");
+    }
+    memcpy(id, tail, n);
+    id[n] = '\0';
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    photo_t *p = photo_find(id);
+    if (p == NULL)
+    {
+        xSemaphoreGive(s_lock);
+        return send_error(req, "404 Not Found", "No such photo here");
+    }
+    p->sending++;
+    char type[32];
+    strlcpy(type, p->type, sizeof(type));
+    const uint8_t *data = p->data;
+    size_t len = p->len;
+    xSemaphoreGive(s_lock);
+
+    httpd_resp_set_type(req, type);
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
+    esp_err_t err = httpd_resp_send(req, (const char *)data, len);   /* with a Content-Length */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    p->sending--;
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
+#if PHOTO_SELFTEST
+/* Transfer speed test without a phone: board F034 announces made-up photos after boot. */
+static void selftest_task(void *arg)
+{
+    (void)arg;
+    if (strcmp(s_node, "F034") != 0)
+    {
+        vTaskDelete(NULL);
+        return;
+    }
+    const size_t sizes[] = { 150 * 1024, 300 * 1024 };
+    vTaskDelay(pdMS_TO_TICKS(40000));
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+    {
+        while (!(xEventGroupGetBits(s_events) & CONNECTED_BIT))
+        {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        uint8_t *buf = heap_caps_malloc(sizes[i], MALLOC_CAP_SPIRAM);
+        if (buf == NULL)
+        {
+            break;
+        }
+        for (size_t k = 0; k < sizes[i]; k += 4)
+        {
+            uint32_t r = esp_random();
+            memcpy(buf + k, &r, sizes[i] - k < 4 ? sizes[i] - k : 4);
+        }
+        announce_photo("selftest", "application/octet-stream", buf, sizes[i], 0);
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+    vTaskDelete(NULL);
+}
+#endif
+
 /* POST /api/settings {"name": "...", "tx_dbm": 8}; TX power takes effect after a reboot. */
 static esp_err_t settings_handler(httpd_req_t *req)
 {
@@ -1208,6 +1620,9 @@ static void web_server_start(void)
     cfg.lru_purge_enable = true;
     cfg.stack_size = 8192;
     cfg.max_uri_handlers = 16;
+    cfg.uri_match_fn = httpd_uri_match_wildcard;
+    cfg.recv_wait_timeout = 30;   /* phones upload photos slowly sometimes */
+    cfg.send_wait_timeout = 30;   /* other boards pull photos over the mesh */
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &cfg) != ESP_OK)
     {
@@ -1219,6 +1634,8 @@ static void web_server_start(void)
         { .uri = "/api/status", .method = HTTP_GET, .handler = status_handler },
         { .uri = "/api/messages", .method = HTTP_GET, .handler = messages_handler },
         { .uri = "/api/send", .method = HTTP_POST, .handler = send_handler },
+        { .uri = "/api/photo", .method = HTTP_POST, .handler = photo_upload_handler },
+        { .uri = "/api/photo/*", .method = HTTP_GET, .handler = photo_get_handler },
         { .uri = "/api/settings", .method = HTTP_POST, .handler = settings_handler },
         { .uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_handler },
     };
@@ -1286,4 +1703,9 @@ void app_main(void)
     xTaskCreate(halow_task, "halow", 8192, NULL, 5, NULL);
     xTaskCreate(hotspot_resume_task, "hotspot_resume", 3072, NULL, 4, NULL);
     xTaskCreate(udp_task, "chat_udp", 6144, NULL, 6, NULL);
+    s_fetch_queue = xQueueCreate(8, sizeof(fetch_job_t));
+    xTaskCreate(fetch_task, "photo_fetch", 6144, NULL, 4, NULL);
+#if PHOTO_SELFTEST
+    xTaskCreate(selftest_task, "selftest", 4096, NULL, 3, NULL);
+#endif
 }

@@ -43,6 +43,9 @@
   .peer-on { color: var(--good); } .peer-off { color: var(--muted); }
   .err { color: var(--bad); font-size: 13px; padding: 4px 14px; background: var(--card); }
   details { font-size: 13px; color: var(--muted); padding: 4px 14px; background: var(--card); }
+  .msg img { display: block; max-width: 100%; border-radius: 10px; margin-top: 4px; }
+  .msg .photo-wait { font-size: 13px; color: var(--muted); font-style: italic; }
+  #photo-btn { flex: none; }
 </style>
 </head>
 <body>
@@ -57,6 +60,8 @@
 <form id="form">
   <input id="name" placeholder="Your name" maxlength="24" autocomplete="off">
   <input id="text" placeholder="Message" maxlength="200" autocomplete="off">
+  <button id="photo-btn" class="ghost" type="button" title="Send a photo">&#128247;</button>
+  <input id="photo" type="file" accept="image/*" hidden>
   <button id="send">Send</button>
 </form>
 
@@ -81,7 +86,28 @@ function render(m) {
   const meta = document.createElement("div"); meta.className = "meta";
   div.append(who, text, meta);
   $("log").appendChild(div);
+  updatePhoto(div, m);
   updateMeta(div, m);
+}
+
+function updatePhoto(div, m) {
+  if (!m.photo) return;
+  let box = div.querySelector(".photo-box");
+  if (!box) { box = document.createElement("div"); box.className = "photo-box"; div.querySelector(".text").after(box); }
+  if (m.photo_ready) {
+    if (box.dataset.ready) return;
+    box.dataset.ready = "1"; box.textContent = "";
+    const url = "/api/photo/" + m.photo;
+    if ((m.photo_type || "").startsWith("image/")) {
+      const img = document.createElement("img"); img.src = url; img.loading = "lazy"; img.alt = "photo";
+      box.appendChild(img);
+    } else {
+      const a = document.createElement("a"); a.href = url; a.textContent = "download file"; box.appendChild(a);
+    }
+  } else if (!box.dataset.ready) {
+    box.className = "photo-box photo-wait";
+    box.textContent = m.mine ? "" : "photo arriving over the mesh, " + Math.round((m.photo_bytes || 0) / 1024) + " KB";
+  }
 }
 
 function updateMeta(div, m) {
@@ -90,7 +116,11 @@ function updateMeta(div, m) {
   const read = m.read_by || [];
   let state = "";
   if (m.mine) state = read.length ? "seen by " + read.join(", ") : boards ? "delivered to " + boards + " board" + (boards > 1 ? "s" : "") : "not delivered yet";
-  meta.textContent = [when(m.ts), m.hops ? m.hops + " hop" + (m.hops > 1 ? "s" : "") : "", state].filter(Boolean).join(" · ");
+  let xfer = "";
+  if (m.photo && !m.mine && m.photo_ready && m.fetch_ms > 0) {
+    xfer = Math.round(m.photo_bytes / 1024) + " KB in " + (m.fetch_ms / 1000).toFixed(1) + " s, " + Math.round(m.photo_bytes * 8 / m.fetch_ms) + " kbit/s over the mesh";
+  }
+  meta.textContent = [when(m.ts), m.hops ? m.hops + " hop" + (m.hops > 1 ? "s" : "") : "", state, xfer].filter(Boolean).join(" · ");
 }
 
 let polling = false;
@@ -112,7 +142,7 @@ async function poll() {
     const all = await r2.json();
     for (const m of all.messages) {
       const div = document.querySelector('.msg[data-id="' + m.id + '"]');
-      if (div) updateMeta(div, m);
+      if (div) { updatePhoto(div, m); updateMeta(div, m); }
     }
   } catch (e) {}
   polling = false;
@@ -182,6 +212,49 @@ $("form").addEventListener("submit", async (ev) => {
   }
   $("send").disabled = false;
   $("text").focus();
+});
+
+async function shrink(file, maxSide, quality) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bmp.width * scale); canvas.height = Math.round(bmp.height * scale);
+  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  return await new Promise((ok, fail) => canvas.toBlob(b => b ? ok(b) : fail(new Error("no blob")), "image/jpeg", quality));
+}
+
+$("photo-btn").addEventListener("click", () => {
+  const name = $("name").value.trim();
+  if (!name) { $("err").textContent = "Enter your name first."; $("err").hidden = false; $("name").focus(); return; }
+  $("photo").click();
+});
+
+$("photo").addEventListener("change", async (ev) => {
+  const file = ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  const name = $("name").value.trim();
+  try { localStorage.setItem("halowchat-name", name); } catch (e) {}
+  const limit = 400 * 1024;
+  $("err").textContent = "Preparing photo..."; $("err").hidden = false;
+  let blob = file;
+  for (const [side, q] of [[1024, 0.7], [800, 0.6], [640, 0.5]]) {
+    try { blob = await shrink(file, side, q); } catch (e) { break; }
+    if (blob.size <= limit) break;
+  }
+  if (blob.size > limit) { $("err").textContent = "Photo is " + Math.round(blob.size / 1024) + " KB after shrinking; the limit is 400 KB."; return; }
+  $("err").textContent = "Sending photo, " + Math.round(blob.size / 1024) + " KB...";
+  try {
+    const r = await fetch("/api/photo?name=" + encodeURIComponent(name) + "&ts=" + Date.now(),
+      { method: "POST", headers: { "Content-Type": blob.type || "application/octet-stream" }, body: blob });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "Photo failed");
+    $("err").hidden = true;
+    await poll();
+    $("log").scrollTop = $("log").scrollHeight;
+  } catch (e) {
+    $("err").textContent = e.message;
+  }
 });
 
 status(); poll();

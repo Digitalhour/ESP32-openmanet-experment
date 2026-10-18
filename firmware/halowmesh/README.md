@@ -16,7 +16,7 @@ boards on a desk. Use at your own risk. See the warning in the top-level README.
 | File | Job |
 |---|---|
 | `main/mesh.c`, `main/mesh.h` | The mesh layer. Brings the mesh interface up on the chip, beacons with a Mesh ID, learns neighbours, carries Ethernet frames in 4-address mesh data frames, floods broadcasts with a hop limit and duplicate suppression, learns routes for unicast, and presents itself as an esp_netif so IP works on top. |
-| `main/chat_main.c` | The chat: phone hotspot, web page and API, UDP chat protocol over the mesh (messages, delivered and seen receipts, retries, saved history, pings between boards). |
+| `main/chat_main.c` | The chat: phone hotspot, web page and API, UDP chat protocol over the mesh (messages, delivered and seen receipts, retries, saved history, pings between boards), and photos: the phone uploads to its board, the board announces it, the other boards pull it over the mesh with HTTP and show how long it took. |
 | `main/chat_ui.html` | The chat page served to the phone. |
 | `main/Kconfig.projbuild` | Settings: mesh name, channel, TX power cap, hop limit, hotspot password, ports. |
 
@@ -59,8 +59,11 @@ Transmit from lwIP: group addresses are flooded; unicast goes to the learned nex
 flooded when no route is known yet. The first packet to a new board floods, the reply teaches
 the route, and from then on it is unicast with 802.11 acknowledgements.
 
-Rates: frames currently use morselib's management rate table (the lowest MCS). Plenty for
-chat, slow for anything bigger. A data rate table is the obvious next improvement.
+Rates: broadcasts go at MCS0 like morselib's management frames. Unicast frames start higher
+when the next hop's beacons are strong (MCS5 above -55 dBm, down to MCS1 near -86 dBm) and fall
+back down a three-step chain to MCS0 if the chip cannot get them through. Measured with a
+300 KB photo between two boards on the desk: about 500 kbit/s with this, 130 to 200 kbit/s
+at MCS0 only.
 
 ## Addresses
 
@@ -96,7 +99,11 @@ power in the field. Weak USB ports reset the module when it transmits long frame
 - Mesh frame counters: sent, failed, received, relayed, duplicates dropped, routes known.
 
 `GET /api/status` returns all of it as JSON. `GET /api/messages?after=N&name=You`,
-`POST /api/send {name, text, ts}`, `POST /api/settings {name, tx_dbm}`, `POST /api/reboot`.
+`POST /api/send {name, text, ts}`, `POST /api/photo?name=You&ts=... (image as the body)`,
+`GET /api/photo/<id>`, `POST /api/settings {name, tx_dbm}`, `POST /api/reboot`.
+
+Under a received photo the page shows "300 KB in 5.1 s, 481 kbit/s over the mesh": that is
+the real transfer time between the two boards, a direct measure of what the mesh carries.
 
 ## Results so far (2026-10-18)
 
@@ -108,6 +115,10 @@ Two boards on the desk, 2 MHz channel 26, 8 dBm:
 - Unicast pings over the mesh: 14 to 29 ms, 6 of 6 answered.
 - Range: chat between a phone on one board and the other board 245 ft away, through an
   aluminium-sided house wall, at the 8 dBm bench power cap.
+- Photos: 150 KB in 2.4 s and 300 KB in 5.1 s board to board over the mesh (TCP over
+  the flooded-then-routed path), about 500 kbit/s on the desk. Phones shrink photos to
+  1024 px JPEG before upload; the limit is 400 KB per photo, six photos kept per board in
+  PSRAM, not kept across a reboot.
 
 Multi-hop relaying is implemented but untested: it needs a third board placed out of range
 of the first. Mesh peering (the 802.11s handshake), path selection (HWMP) and encryption are

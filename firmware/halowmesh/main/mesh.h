@@ -48,6 +48,7 @@ struct mesh_stats
     uint32_t tx_frames, tx_failed, tx_flooded;
     uint32_t rx_frames, rx_delivered, rx_forwarded, rx_duplicates, rx_queue_full;
     uint32_t beacons_built, beacons_heard;
+    uint32_t tx_by_mcs[8];      /* unicast frames sent at each starting MCS */
 };
 
 /* Boots the HaLow chip, starts the mesh interface and creates the network interface (not yet
