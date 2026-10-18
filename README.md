@@ -62,6 +62,61 @@ neighbours, the boards it can reach, and a ping time to each.
 Requirements: ESP-IDF v5.4.4, the `morsemicro/halow` component 2.11.2-esp32-2 (fetched by
 the build), a 2 A power supply per board for full power in the field.
 
+## Roadmap: joining the OpenMANET ecosystem
+
+The hope is for these cheap boards to become part of the OpenMANET world: XIAO nodes
+meshing among themselves and, where a Raspberry Pi node is present, handing traffic into an
+OpenMANET network. OpenMANET runs OpenWrt on a Pi with a HaLow HAT, 802.11s mesh with a mesh
+password, and batman-adv (BATMAN_V) routing on top. To talk to it, a XIAO has to speak both
+layers. Here is the plan, in the order it will be attempted. None of it is promised; each
+step gets its own probe first, the way everything above was done.
+
+**Step 1, done: the radio.** Mesh interface, Mesh ID beacons, peering frames and 4-address
+data frames all work on the chip from the ESP32. This repository.
+
+**Step 2, done: our own mesh.** Flooding, duplicate suppression, learned routes, IP on top,
+chat on top of that. Works between two boards; relaying through a third is next to test.
+
+**Step 3: a Pi as the door, no changes to the XIAO.** An OpenMANET Pi could run a HaLow
+access point on the same radio next to its mesh interface. A XIAO joins that access point as
+a plain station (the hub firmware in `firmware/halowchat` already does this) and the Pi
+bridges it into the batman network like any other client. This is the quickest way to get a
+XIAO's traffic into an OpenMANET net, and it needs to be checked first: whether Morse's Linux
+driver allows mesh and access point on one radio at the same time.
+
+**Step 4: 802.11s peering.** The real handshake with a neighbour: Mesh Peering Open, Confirm
+and Close with link ids, timers and retries. The frames already fly; the state machine does
+not exist yet. With this, a XIAO is a proper mesh point and could peer with a Linux mesh
+point that has security off.
+
+**Step 5: the mesh password.** OpenMANET nodes encrypt the mesh: SAE authentication between
+peers, then the authenticated peering exchange, then per-neighbour keys loaded into the
+chip. The chip does the encryption; the handshake code is the work. The mesh versions of
+that code exist in the SDK tree uncompiled (`mesh_rsn.c`, `mesh_mpm.c`) but are written
+against Linux driver calls. Weeks of careful crypto plumbing, and the step that lets a XIAO
+peer with a real OpenMANET node at the radio layer.
+
+**Step 6: batman-adv on the ESP32, if possible.** Peering gets a XIAO heard; batman-adv gets
+it understood. Everything OpenMANET sends rides inside batman-adv frames (ethertype 0x4305):
+ELP hellos every half second, OGMv2 route announcements, translation tables with checksums
+that say which client addresses sit behind which node, and its own unicast and broadcast
+wrapping. The plan is a minimal BATMAN_V node, not a port of the Linux module: send ELP and
+OGMv2 so other nodes see us, learn originators and next hops from their OGMv2, announce our
+own address (and our phone hotspot clients) in the translation table, answer translation
+table requests, wrap and unwrap unicast and broadcast. The Linux batman-adv source and the
+open-mesh.org protocol documents are the reference; a Pi running OpenMANET is the test rig.
+This is the biggest piece and the least certain. If it works, a XIAO becomes a first-class
+OpenMANET node with no Pi needed except where internet or the heavy apps live.
+
+**Step 7: the ecosystem.** OpenMANET's apps run over IP on the mesh: position sharing, ATAK
+over multicast, push-to-talk. Once a XIAO is a batman node, the first targets are passing
+ATAK multicast between a phone on the XIAO's hotspot and the rest of the net, and a small
+status beacon so OpenMANET's UI can show XIAO nodes. Where the mesh needs a Pi (gateway,
+camera, voice), the XIAOs extend its reach cheaply.
+
+Help is welcome on any step, especially from anyone who knows batman-adv internals, 802.11s
+security, or the Morse Micro Linux driver.
+
 ## Credits and references
 
 - Claude Fable 5.1 (Anthropic): research, firmware and documentation, working with me in
