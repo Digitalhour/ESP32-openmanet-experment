@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XIAO HaLow Gateway — Web Flasher</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1.5' y='14' width='4' height='8.5' fill='%23c1662d'/%3E%3Crect x='10' y='8.5' width='4' height='14' fill='%23c1662d'/%3E%3Crect x='18.5' y='2.5' width='4' height='20' fill='%23c1662d'/%3E%3C/svg%3E">
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --color-bg: #f3f4f6;
+    --color-surface: #ffffff;
+    --color-ink: #171b21;
+    --color-muted: #5c6570;
+    --color-accent: #c1662d;
+    --color-on-accent: #1a1006;
+    --color-line: #dde1e6;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+    --font-body: -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-bg: #12151a;
+      --color-surface: #1a1f26;
+      --color-ink: #e8eaed;
+      --color-muted: #9aa3af;
+      --color-accent: #e0924f;
+      --color-line: #2a2f38;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.6;
+    max-width: 38rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 4vw, 3.5rem) 1.25rem 4rem;
+  }
+
+  a { color: var(--color-accent); }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  header { margin-bottom: 2rem; }
+
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    margin-bottom: 0.9rem;
+  }
+
+  .signal-bars {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+  }
+  .signal-bars span {
+    display: block;
+    width: 3px;
+    background: var(--color-accent);
+  }
+  .signal-bars span:nth-child(1) { height: 40%; }
+  .signal-bars span:nth-child(2) { height: 70%; }
+  .signal-bars span:nth-child(3) { height: 100%; }
+
+  h1 {
+    font-family: var(--font-mono);
+    font-size: clamp(1.35rem, 4vw, 1.65rem);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 0.3rem;
+  }
+  h1 span {
+    display: block;
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--color-accent);
+    margin-top: 0.35rem;
+  }
+
+  h2 {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    border-top: 1px solid var(--color-line);
+    padding-top: 0.5rem;
+    margin: 2.25rem 0 1rem;
+  }
+
+  p { color: var(--color-ink); }
+  .lede { color: var(--color-muted); }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+  }
+
+  /* HUD-style bracketed panel for the placeholder-config callout */
+  .panel {
+    position: relative;
+    background: var(--color-surface);
+    padding: 1.1rem 1.25rem;
+    margin: 1.5rem 0;
+    font-size: 0.95rem;
+  }
+  .panel::before, .panel::after,
+  .panel > .corner::before, .panel > .corner::after {
+    content: "";
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--color-accent);
+  }
+  .panel::before { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+  .panel::after { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+  .panel > .corner::before { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+  .panel > .corner::after { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+
+  .panel strong { color: var(--color-accent); }
+
+  /* Version Selector & Tracker HUD Panel */
+  .version-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
+    padding: 1.1rem 1.25rem;
+    margin: 1.5rem 0 1.25rem;
+    border-radius: 3px;
+  }
+  .version-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.6rem;
+  }
+  .version-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .badge {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+  }
+  .badge-latest {
+    background: rgba(193, 102, 45, 0.15);
+    color: var(--color-accent);
+    border: 1px solid var(--color-accent);
+  }
+  .badge-history {
+    background: rgba(92, 101, 112, 0.15);
+    color: var(--color-muted);
+    border: 1px solid var(--color-line);
+  }
+  .select-wrapper {
+    position: relative;
+    margin-bottom: 0.85rem;
+  }
+  select.version-select {
+    width: 100%;
+    padding: 0.65rem 0.85rem;
+    font-family: var(--font-mono);
+    font-size: 0.88rem;
+    background: var(--color-bg);
+    color: var(--color-ink);
+    border: 1px solid var(--color-line);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  select.version-select:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+  .version-card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-line);
+    padding: 0.85rem 1rem;
+    border-radius: 2px;
+    font-size: 0.85rem;
+  }
+  .vcard-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1.5rem;
+    margin-bottom: 0.6rem;
+  }
+  .vcard-row:last-child { margin-bottom: 0; }
+  .vcard-cell { flex: 1 1 10rem; }
+  .vcard-cell.full-width { flex: 1 1 100%; }
+  .vcard-title {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    margin-bottom: 0.2rem;
+  }
+  .vcard-val {
+    color: var(--color-ink);
+    font-weight: 500;
+  }
+  .vcard-val.font-mono {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+  }
+  .vcard-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-top: 1px solid var(--color-line);
+    padding-top: 0.55rem;
+    margin-top: 0.6rem;
+    font-size: 0.78rem;
+  }
+  .vcard-meta { color: var(--color-muted); font-family: var(--font-mono); font-size: 0.75rem; }
+  .vcard-link {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    text-decoration: none;
+  }
+  .vcard-link:hover { text-decoration: underline; }
+  .alpha-note {
+    font-size: 0.78rem;
+    color: var(--color-muted);
+    margin: 0.75rem 0 0;
+    line-height: 1.45;
+  }
+
+  esp-web-install-button { display: block; margin: 1.5rem 0; }
+
+  .flash-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-on-accent);
+    background: var(--color-accent);
+    border: 1px solid var(--color-accent);
+    padding: 0.85rem 1.5rem;
+    cursor: pointer;
+    transition: filter 0.15s ease;
+  }
+  .flash-btn::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-on-accent);
+    opacity: 0.6;
+  }
+  .flash-btn:hover { filter: brightness(1.08); }
+  @media (prefers-reduced-motion: reduce) {
+    .flash-btn { transition: none; }
+  }
+
+  .unsupported {
+    display: none;
+    font-size: 0.9rem;
+    color: var(--color-muted);
+  }
+
+  ol.steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+  ol.steps li {
+    display: grid;
+    grid-template-columns: 2.1rem 1fr;
+    gap: 0.75rem;
+    align-items: baseline;
+  }
+  ol.steps li::before {
+    counter-increment: step;
+    content: "[" counter(step) "]";
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--color-accent);
+  }
+  ol.steps li > span { display: block; }
+  ol.steps { counter-reset: step; }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--color-line);
+    font-size: 0.8rem;
+    color: var(--color-muted);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">
+    <span class="signal-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+    OpenMANET · Device Flasher
+  </div>
+  <h1>XIAO HaLow Gateway<span>Web Flasher</span></h1>
+</header>
+
+<p class="lede">
+  Flashes the <a href="https://github.com/d3mocide/OpenMANET-XIAO-Gateway">OpenMANET-XIAO-Gateway</a>
+  firmware onto a Seeed XIAO ESP32-S3 + Seeed XIAO WM6108 (HaLow) node. Works in Chrome or Edge over USB —
+  no software to install.
+</p>
+
+<div class="panel">
+  <span class="corner" aria-hidden="true"></span>
+  This flashes firmware with <strong>placeholder configuration</strong> (open HaLow uplink, default
+  local Wi-Fi credentials). See "After flashing" below to set your real values — nothing here bakes
+  in your Wi-Fi/HaLow credentials, they're entered later over the device's own local network, not
+  typed into this page.
+</div>
+
+<div class="version-section">
+  <div class="version-header">
+    <label for="versionSelect" class="version-label">Firmware Build / Version</label>
+    <span id="versionStatusBadge" class="badge badge-latest">Latest Build</span>
+  </div>
+  <div class="select-wrapper">
+    <select id="versionSelect" class="version-select" aria-label="Select firmware version to flash">
+      <option value="manifest.json">Latest Build (manifest.json)</option>
+    </select>
+  </div>
+  <div id="versionCard" class="version-card">
+    <div class="vcard-row">
+      <div class="vcard-cell">
+        <span class="vcard-title">Version / Commit</span>
+        <span id="vcardSha" class="vcard-val font-mono">Latest commit</span>
+      </div>
+      <div class="vcard-cell">
+        <span class="vcard-title">Build Date</span>
+        <span id="vcardDate" class="vcard-val font-mono">Automated CI build</span>
+      </div>
+    </div>
+    <div class="vcard-row">
+      <div class="vcard-cell full-width">
+        <span class="vcard-title">Commit Summary</span>
+        <span id="vcardMsg" class="vcard-val">Main branch firmware</span>
+      </div>
+    </div>
+    <div class="vcard-row vcard-footer">
+      <span class="vcard-meta">Chip: <strong>ESP32-S3</strong> · US Region · Dual-OTA</span>
+      <a id="vcardCommitLink" class="vcard-link" href="https://github.com/d3mocide/OpenMANET-XIAO-Gateway" target="_blank" rel="noopener">Repository &rarr;</a>
+    </div>
+  </div>
+  <p class="alpha-note">
+    <strong>Alpha build retention:</strong> Up to 3 previous builds (<code>n-1</code>, <code>n-2</code>, <code>n-3</code>) are preserved above so you can easily roll back if a recent build has an issue.
+  </p>
+</div>
+
+<esp-web-install-button id="installBtn" manifest="manifest.json">
+  <button slot="activate" class="flash-btn">Connect &amp; Flash</button>
+  <span slot="unsupported" class="unsupported">
+    Your browser doesn't support Web Serial. Use Chrome or Edge on desktop.
+  </span>
+  <span slot="not-allowed" class="unsupported">
+    Web Serial is only available over HTTPS (this page should already be HTTPS via GitHub Pages).
+  </span>
+</esp-web-install-button>
+
+<h2>Before flashing</h2>
+<ol class="steps">
+  <li><span>Plug the XIAO ESP32-S3 in via USB-C.</span></li>
+  <li><span>Click "Connect &amp; Flash" above and pick the device's serial port when your browser asks.</span></li>
+</ol>
+
+<h2>After flashing</h2>
+<ol class="steps">
+  <li><span>The device boots and starts its own Wi-Fi access point. Default SSID is
+      <code>xiao-gateway-xxxx</code>, password <code>openmanet</code> — <code>xxxx</code> is four hex
+      characters from that specific unit's factory-burned MAC address, so every fresh node gets a
+      different, stable name out of the box rather than colliding with other units nearby (see the
+      firmware's
+      <a href="https://github.com/d3mocide/OpenMANET-XIAO-Gateway/blob/main/main/provisioning.c">defaults</a>).</span></li>
+  <li><span>Connect your laptop or phone to that Wi-Fi network.</span></li>
+  <li><span>Browse to <code>http://172.16.50.1/</code> — the on-device config page.</span></li>
+  <li><span><strong>First visit only:</strong> the page forces you to set an admin password before
+      anything else works — there is no default or shared login. Choose one you'll remember; the
+      only way back in if you lose it is the factory-reset button below, which also wipes your
+      uplink/SoftAP config back to placeholders.</span></li>
+  <li><span>Use the config page's <strong>Scan for HaLow APs</strong> button to find the mesh Pi's
+      access point, then click the result to fill in its SSID.</span></li>
+  <li><span>Set the uplink security/passphrase (open/OWE/SAE only — see the
+      <a href="https://github.com/d3mocide/OpenMANET-XIAO-Gateway/blob/main/design/PI_SIDE.md">Pi-side reference</a>
+      for what the mesh Pi expects) and your own local Wi-Fi SSID/password, then Save and Reboot.</span></li>
+</ol>
+<p>
+  The same firmware image can also run as a <strong>relay</strong> node (HaLow AP downlink + Wi-Fi
+  uplink to the Pi, so other XIAO nodes associate to it instead of the Pi directly) — switch to it
+  from the config page's Node → Role field or <code>gwcfg-set-role relay</code> over serial. The
+  default out of the box is the client role described above.
+</p>
+
+<h2>Reading the on-board LED</h2>
+<p>
+  The XIAO's user LED reports how far the node got, with no cable and no phone attached. Full
+  bring-up procedure is in the
+  <a href="https://github.com/d3mocide/OpenMANET-XIAO-Gateway/blob/main/design/HARDWARE.md">hardware and bring-up guide</a>.
+</p>
+<ul class="steps">
+  <li><span><strong>Fast triple-blink</strong> — the HaLow radio didn't initialize. Check the module is
+      seated and that you flashed a build matching your hardware.</span></li>
+  <li><span><strong>Slow blink</strong> — radio up, looking for the Pi's access point.</span></li>
+  <li><span><strong>Double-blink</strong> — associated, but the Pi hasn't given it an address yet.</span></li>
+  <li><span><strong>Solid</strong> — uplink up.</span></li>
+</ul>
+<p>
+  Locked out of the config page? Hold the <strong>BOOT button for 5 seconds</strong> while the node is
+  running to restore the default settings — the LED starts blinking fast after about 1.5 seconds to
+  confirm, and releasing before 5 seconds cancels.
+</p>
+
+<h2>Regulatory / country code</h2>
+<p>
+  This firmware is <strong>US-only (902–928 MHz)</strong>, because the hardware is. The XIAO HaLow
+  board carries a Quectel <strong>FGH100M-H</strong>, a 902–928 MHz part, and the board calibration
+  file the firmware loads is Morse Micro's <code>bcf_fgh100mhaamd.bin</code> — listed upstream as
+  "FGH100M-H (US)". Seeed likewise document the board as North America only. There is no EU/UK/JP
+  variant of this module to build for.
+</p>
+<p>
+  The channel list is baked in at compile time (<code>CONFIG_HALOW_COUNTRY_CODE="US"</code>) and
+  can't be changed afterward from this page or the on-device config UI. Your mesh Pi's HaLow radio
+  has to be on the same regulatory domain — a mismatch is silent, and shows up as a scan that finds
+  nothing rather than as an error.
+</p>
+
+<footer>Firmware built automatically from the repository's <code>main</code> branch.</footer>
+
+<script>
+'use strict';
+
+(function() {
+  const repoBaseUrl = 'https://github.com/d3mocide/OpenMANET-XIAO-Gateway';
+  const versionSelect = document.getElementById('versionSelect');
+  const installBtn = document.getElementById('installBtn');
+  const vcardSha = document.getElementById('vcardSha');
+  const vcardDate = document.getElementById('vcardDate');
+  const vcardMsg = document.getElementById('vcardMsg');
+  const vcardCommitLink = document.getElementById('vcardCommitLink');
+  const versionStatusBadge = document.getElementById('versionStatusBadge');
+
+  let availableBuilds = [];
+
+  function updateCard(build) {
+    if (!build) return;
+    vcardSha.textContent = build.version || build.sha || 'latest';
+    vcardDate.textContent = build.displayDate || (build.date ? new Date(build.date).toLocaleString() : 'Automated CI build');
+    vcardMsg.textContent = build.title || build.message || (build.isRelease ? 'Official Tagged Release' : 'Main branch development build');
+
+    if (build.sha && build.sha !== 'latest') {
+      vcardCommitLink.href = `${repoBaseUrl}/commit/${build.fullSha || build.sha}`;
+      vcardCommitLink.textContent = `Commit (${build.sha.substring(0, 7)}) \u2192`;
+    } else {
+      vcardCommitLink.href = repoBaseUrl;
+      vcardCommitLink.textContent = 'Repository \u2192';
+    }
+
+    if (build.isRelease) {
+      if (build.isLatest) {
+        versionStatusBadge.className = 'badge badge-latest';
+        versionStatusBadge.textContent = 'Latest Release';
+      } else {
+        versionStatusBadge.className = 'badge badge-history';
+        versionStatusBadge.textContent = build.tag || 'Past Release';
+      }
+    } else {
+      versionStatusBadge.className = 'badge badge-history';
+      versionStatusBadge.style.color = 'var(--color-warn)';
+      versionStatusBadge.style.borderColor = 'var(--color-warn)';
+      versionStatusBadge.textContent = 'Dev Build (main)';
+    }
+
+    const manifestUrl = build.manifest || 'manifest.json';
+    installBtn.setAttribute('manifest', manifestUrl);
+  }
+
+  async function initVersionTracker() {
+    try {
+      const res = await fetch('builds.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error('builds.json not found');
+      const data = await res.json();
+      if (data) {
+        const releases = Array.isArray(data.releases) ? data.releases : [];
+        const devBuilds = Array.isArray(data.devBuilds) ? data.devBuilds : [];
+        availableBuilds = data.builds || [...releases, ...devBuilds];
+
+        versionSelect.innerHTML = '';
+
+        if (releases.length > 0) {
+          const relGroup = document.createElement('optgroup');
+          relGroup.label = 'Tagged Releases (Recommended)';
+          releases.forEach((b, idx) => {
+            const opt = document.createElement('option');
+            opt.value = b.manifest;
+            const tag = b.tag || (idx === 0 ? 'Latest Release' : `Previous (n-${idx})`);
+            const dateStr = b.date ? ` · ${b.date.substring(0, 10)}` : '';
+            opt.textContent = `[${tag}] ${b.version}${dateStr}`;
+            relGroup.appendChild(opt);
+          });
+          versionSelect.appendChild(relGroup);
+        }
+
+        if (devBuilds.length > 0) {
+          const devGroup = document.createElement('optgroup');
+          devGroup.label = 'Development Builds (Bleeding Edge)';
+          devBuilds.forEach((b) => {
+            const opt = document.createElement('option');
+            opt.value = b.manifest;
+            const dateStr = b.date ? ` · ${b.date.substring(0, 10)}` : '';
+            opt.textContent = `[Dev Build] ${b.version}${dateStr}`;
+            devGroup.appendChild(opt);
+          });
+          versionSelect.appendChild(devGroup);
+        }
+
+        // Default to latest release if available, otherwise first build
+        const defaultBuild = releases.length > 0 ? releases[0] : (availableBuilds[0] || null);
+        if (defaultBuild) {
+          versionSelect.value = defaultBuild.manifest;
+          updateCard(defaultBuild);
+        }
+      }
+    } catch (e) {
+      // Fallback if builds.json is unavailable
+      versionSelect.innerHTML = '<option value="manifest.json">Default Build (manifest.json)</option>';
+      fetch('manifest.json')
+        .then(r => r.json())
+        .then(m => {
+          if (m && m.version) {
+            vcardSha.textContent = m.version;
+            vcardMsg.textContent = m.name || 'XIAO HaLow Gateway';
+            if (/^[0-9a-f]{7,40}$/i.test(m.version)) {
+              vcardCommitLink.href = `${repoBaseUrl}/commit/${m.version}`;
+              vcardCommitLink.textContent = `Commit (${m.version.substring(0, 7)}) \u2192`;
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  versionSelect.addEventListener('change', function() {
+    const selectedManifest = this.value;
+    const found = availableBuilds.find(b => b.manifest === selectedManifest);
+    if (found) {
+      updateCard(found);
+    } else {
+      installBtn.setAttribute('manifest', selectedManifest);
+    }
+  });
+
+  initVersionTracker();
+})();
+</script>
+
+</body>
+</html>

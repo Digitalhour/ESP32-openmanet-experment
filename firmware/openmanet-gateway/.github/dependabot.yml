@@ -1,0 +1,40 @@
+version: 2
+
+# Time-based pinning for external dependencies - review finding F16
+# (design/PROJECT_REVIEW_2026-09-10.md): every third-party GitHub Action used
+# by build-firmware.yml is pinned to a specific commit SHA (not a mutable
+# tag - one of them, espressif/esp-idf-ci-action's "v1", turned out to be a
+# branch, not even a tag), but a pin alone doesn't defend against adopting a
+# *freshly published* malicious release the moment it lands - a watering-hole
+# / supply-chain compromise published under a legitimate maintainer's account
+# is exactly the case a same-day pin bump would walk straight into. Most
+# such compromises are caught and pulled within days once the community
+# notices; a deliberate delay before a newly-published version is even
+# proposed here is cheap insurance against that window.
+#
+# `cooldown.default-days: 14` (schema: https://www.schemastore.org/dependabot-2.0.json)
+# means a new action release has to be public for two weeks before Dependabot
+# will open a PR bumping to it - long enough for an actively-exploited
+# compromise to surface, short enough not to fall meaningfully behind on
+# routine, benign updates.
+#
+# Scoped to the github-actions ecosystem only: this is the one dependency
+# surface Dependabot actually understands here. The ESP-IDF version
+# (main's CI workflow env, IDF_VERSION) and the vendored morsemicro/halow
+# component (main/idf_component.yml, dependencies.lock) are both managed by
+# ESP-IDF's own component manager, which isn't a Dependabot-recognized
+# ecosystem - those two need the same "wait before bumping" discipline
+# applied by hand; see CLAUDE.md/design/ROADMAP.md for that policy note.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 14
+    # Grouping so a routine bump lands as one PR/one CI run to review, not
+    # one per action - this workflow uses seven different actions.
+    groups:
+      github-actions:
+        patterns:
+          - "*"

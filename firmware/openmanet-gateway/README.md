@@ -1,0 +1,345 @@
+# OpenMANET-XIAO-Gateway
+
+Firmware for a Seeed XIAO ESP32-S3 + Seeed XIAO WM6108 (HaLow) node that acts as a mesh-connected
+access point for the [OpenMANET](https://github.com/d3mocide) project: phones/tablets/ATAK devices
+associate to the XIAO's local 2.4GHz Wi-Fi AP, and the XIAO relays their IP traffic — including
+ATAK Cursor-on-Target (CoT) multicast — over a HaLow uplink into the mesh via a Raspberry Pi
+node.
+
+> **US only, 902–928 MHz.** The HaLow board carries a **Quectel FGH100M-H** (Morse Micro MM6108
+> silicon), a 902–928 MHz module that Seeed document as North America only. The regulatory domain
+> is compiled in — `CONFIG_HALOW_COUNTRY_CODE="US"` — and there is deliberately no other build.
+> See [`design/HARDWARE.md`](design/HARDWARE.md) "Regulatory domain" for why the other eight
+> `mmregdb` regions can't work on this hardware and why they fail silently.
+
+```
+client (phone/tablet/ATAK) → Wi-Fi → XIAO SoftAP → IP fwd/NAT → HaLow STA → HaLow AP → Pi → mesh
+```
+
+## Architecture
+
+```
+ [Phone / Tablet / ATAK device]              [Phone / Tablet / ATAK device]
+        │ 2.4 GHz Wi-Fi (XIAO SoftAP)                │ 2.4 GHz Wi-Fi (Pi onboard AP)
+        │ DHCP from XIAO, 172.16.50.0/24             │ DHCP from openmanetd, mesh subnet
+        ▼                                             ▼
+ ┌─────────────────────────────┐            ┌───────────────────────────────┐
+ │        XIAO ESP32-S3         │            │              Pi                │
+ │ ┌─────────┐   ┌────────────┐ │            │ ┌────────────┐  ┌────────────┐ │
+ │ │ SoftAP   │IP │ HaLow STA  │ │            │ │ onboard AP │  │ HaLow radio │ │
+ │ │ (esp_wifi)◄─►│(morsemicro/│ │            │ │ (bridged   │  │ (hostapd_s1g│ │
+ │ │ netif    │fwd│ halow,     │ │            │ │  into bat0)│  │  AP mode)   │ │
+ │ └─────────┘   │ WM6108)    │ │            │ └────────────┘  │             │ │
+ │                └─────┬──────┘ │            │                 └──────┬──────┘ │
+ └──────────────────────┼────────┘            └────────────────────────┼────────┘
+                         │  HaLow (sub-GHz), STA → AP association,      │
+                         │  DHCP lease from openmanetd's pool           │
+                         └───────────────────────────────────────────┬─┘
+                                                                      ▼
+                                bat0 (802.11s mesh + batman-adv, flat L2 —
+                                    if/when more than one Pi is deployed)
+                                                                      │
+                                              [ openmanetd: DHCP, CoT/gpsd, gateway ]
+```
+
+Traffic flows both directions: a client behind the XIAO's SoftAP can reach a client behind the Pi's
+onboard AP and vice versa. The two ends are asymmetric, though — the Pi's clients sit directly on
+the flat mesh subnet (bridged into `bat0`), while the XIAO's sit behind **NAT**, because the XIAO
+can't L2-bridge two dissimilar radios the way batman-adv bridges Pi nodes. That's why **CoT
+multicast gets an explicit relay** rather than coming for free, and why nothing on the mesh can
+originate a connection *to* a specific phone behind a XIAO. Full reasoning in
+[`design/ROADMAP.md`](design/ROADMAP.md) → "Settled decisions".
+
+## Documentation
+
+Three documents, deliberately:
+
+| Doc | For |
+|---|---|
+| [`design/ROADMAP.md`](design/ROADMAP.md) | **Start here.** Status, build-order checklist, what isn't built yet, and the decisions that shouldn't be re-made. |
+| [`design/HARDWARE.md`](design/HARDWARE.md) | What to buy, how it goes together, the pin map — and the bring-up runbook for first power-on. |
+| [`design/PI_SIDE.md`](design/PI_SIDE.md) | The other end of the link: what's confirmed about the Pi and mesh, and what still needs checking on a real node. |
+
+[`CLAUDE.md`](CLAUDE.md) has the working rules for anyone (human or agent) changing the firmware.
+
+## Flashing (no toolchain needed)
+
+`docs/` is a browser-based flasher ([ESP Web Tools](https://esphome.github.io/esp-web-tools/),
+Web Serial - Chrome/Edge only) that flashes firmware built automatically by
+[`.github/workflows/build-firmware.yml`](.github/workflows/build-firmware.yml) on every push to
+`main`. It only flashes firmware with placeholder config; see "Configuring a node" below for
+setting real values afterward - nothing is typed into the flasher page itself.
+
+The workflow builds one binary, **US / 902-928 MHz**, with `CONFIG_HALOW_COUNTRY_CODE="US"` baked in
+from `sdkconfig.defaults` (a build-time value the device can't be told at runtime). There is no
+region picker, because there is nothing to pick: the XIAO HaLow board carries a Quectel
+**FGH100M-H**, a 902-928 MHz part whose board-calibration file - `bcf_fgh100mhaamd.bin`, the one
+`CONFIG_MM_BCF_FILE` pins - is named "FGH100M-H (US)" in Morse Micro's own `morse-firmware`
+manifest, and Seeed document the board as North America only.
+
+This repo used to build nine regions off `mmregdb`'s channel tables. That was checking the channel
+plan without checking the radio or the calibration data behind it: four of those regions have
+channels outside the module's band (EU and IN entirely, GB and KR partly), two have no BCF entry at
+all (CA, GB), and only US ships real calibration data. Every one of those failures is silent. See
+`design/HARDWARE.md` "Regulatory domain" for the evidence and the per-region table.
+
+**One-time setup this repo still needs**: GitHub Pages must be enabled with source "GitHub
+Actions" (repo Settings → Pages) before the workflow's deploy step will succeed - it isn't
+something a push can turn on by itself.
+
+## Status
+
+`idf.py build` passes end-to-end against ESP-IDF v5.5.1 and the real `morsemicro/halow`
+component (verified in CI-less form by actually running the build, not just reading code -
+see `design/ROADMAP.md` for current status).
+**Not yet done, and real-hardware-only from here:**
+
+- **Pi-side HaLow AP config** (SSID/security mode) is unconfirmed — see
+  `design/PI_SIDE.md`. Nothing is hardcoded; it's all provisioned via NVS with placeholder
+  defaults (see `gwcfg-*` console commands below). `gwcfg-scan` (or the web UI's scan button) will
+  tell you what the Pi is actually advertising.
+- **`CONFIG_HALOW_COUNTRY_CODE`** is fixed at `"US"` - the only domain this module's 902-928 MHz
+  front end and its BCF support - so the Pi's HaLow radio has to be on US too. It's a build-time
+  Kconfig value, not something `gwcfg-*` can set at runtime.
+- **First hardware bring-up is under way, but only XIAO-to-XIAO so far - no Pi has been tested
+  yet.** SoftAP/DHCP and the HaLow radio itself are confirmed on a real XIAO ESP32-S3 + WM6108
+  (`design/ROADMAP.md` checklist steps 1 and 4), and a relay+leaf pair (two XIAOs, no Pi) has
+  passed association, NAT, DNS forwarding and CoT relay traffic end to end. Association/DHCP/NAT
+  against a real Pi is still unverified (`design/HARDWARE.md` Part 2 walks through proving each
+  one) - see `design/ROADMAP.md` for exactly what's confirmed and what isn't.
+- **Web UI authentication is built and confirmed on hardware; OTA delivery is not.** The config
+  page forces a password on first use (no default/shared login) - see `design/ROADMAP.md` "Not
+  built yet" item 1. OTA was blocked on auth landing first and is next.
+
+## Building
+
+Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/get-started/)
+v5.4.4+ (`morsemicro/halow`'s own minimum) with the ESP32-S3 target.
+
+```sh
+idf.py set-target esp32s3
+idf.py build
+idf.py -p <PORT> flash monitor
+```
+
+The `morsemicro/halow` component is pulled automatically from the ESP Component Registry via
+`main/idf_component.yml` on first build.
+
+### Editing in PlatformIO (VS Code)
+
+`platformio.ini` is checked in so the PlatformIO VS Code extension gives real IntelliSense
+(accurate per-file includes/defines from `compile_commands.json`) across the whole tree,
+including the vendored `morsemicro/halow` component. First run downloads
+`espressif32@6.12.0` (ESP-IDF 5.5.0 plus its own toolchain) into `~/.platformio` - no separate
+ESP-IDF install needed for this, and it's self-contained per machine, so the same
+`platformio.ini` works unmodified on any PC with the extension (or the `pio` CLI) installed.
+
+**`pio run` cannot fully build this project - use it for editing/navigation only, and keep using
+`idf.py build`/`idf.py flash` above (what CI verifies) for real firmware.** PlatformIO's ESP-IDF
+integration doesn't run CMake's own build graph - it reads CMake's configure-time output, then
+recompiles everything itself via SCons - so any `add_custom_command()`/`target_add_binary_data()`
+step never executes under `pio run`. `pio_embed_generated_binaries.py` (a `pre:` extra_script)
+replicates the two mechanical, well-understood instances of that this project has (the minified
+web UI, and the HaLow firmware/BCF blobs) precisely so IntelliSense sees those files too, but the
+`morselib` component goes further - it merges two archives with `ar -M` and then runs Morse's own
+`librarymangler.py` to rename internal symbols against a protected list (almost certainly to keep
+their vendored hostap/wpa_supplicant fork's symbols from colliding with ESP-IDF's own
+`esp_wifi`/`wpa_supplicant`). Replicating *that* without matching it exactly risks a binary that
+links and flashes but has silently wrong radio-stack symbols - worse than the clean build failure
+`pio run` gives today - so it's deliberately left alone. `pio run` fails at
+`Generating project linker script .pio/build/xiao_esp32s3/sections.ld` for this reason; that's
+expected.
+
+## Configuring a node
+
+Config (uplink SSID/PSK/security, local SoftAP SSID/PSK/subnet, node id, CoT multicast
+group/port) is stored in NVS, not hardcoded. On first boot (or after a factory reset) it falls back
+to placeholder defaults - open uplink, SoftAP on `172.16.50.0/24` named `xiao-gateway-xxxx`, node id
+`xiao-gw-xxxx`, where `xxxx` is four hex characters from that specific chip's factory-burned MAC
+address (`esp_efuse_mac_get_default()`), not a value stored anywhere. Every unit gets a different,
+stable `xxxx` out of the box - scan for Wi-Fi networks to find it, or read it off the serial console
+(`gwcfg-show`) or the boot log - so multiple factory-fresh nodes never show up as the same AP. Two
+ways to change either default, both writing to the same config - use whichever's convenient:
+
+**Web UI** (no cable needed): connect to the device's own Wi-Fi (`xiao-gateway-xxxx` /
+`openmanet` by default), then browse to `http://172.16.50.1/`. Passwords are never shown back to
+you - leave a password field blank to keep its current value.
+
+**Serial console** (`idf.py monitor`, or any terminal at the same USB-Serial-JTAG port):
+
+```
+xiao-gw> gwcfg-show
+xiao-gw> gwcfg-set-uplink <ssid> <psk|-> <open|owe|sae>
+xiao-gw> gwcfg-set-softap <ssid> <psk|-> [channel]
+xiao-gw> gwcfg-set-node <node_id>
+xiao-gw> gwcfg-save
+```
+
+(HaLow has no WPA2-PSK mode - only open, OWE, or SAE. There's no uplink channel option either:
+HaLow picks a channel from the regulatory domain set by `CONFIG_HALOW_COUNTRY_CODE`, a build-time
+Kconfig value, not something set here or in the web UI.)
+
+Reboot after saving (either transport) for uplink/SoftAP changes to take effect.
+
+### Node roles: client and relay
+
+One firmware image, one config field (`gwcfg-set-role client|relay`, or the web UI's Node → Role) -
+never a separate build. Every image carries both roles' code; `role` just picks which bring-up path
+`app_main()` takes at boot, exactly like any other stored setting.
+
+- **client** (the default for every factory-fresh or factory-reset node, and everything described
+  above) - local SoftAP for phones/ATAK devices, HaLow STA uplink to a Pi's (or a relay's) HaLow AP.
+- **relay** - for when the Pi itself can't run a HaLow AP at all (see `design/PI_SIDE.md` item 0).
+  A relay joins some Wi-Fi AP directly as an ordinary client - a Pi's local AP, or literally any
+  other Wi-Fi network, `main/uplink_wifi.c` has nothing Pi-specific in it - and offers its own HaLow
+  radio as an AP that other, unmodified client-role XIAOs associate to instead of a Pi. A
+  field-deployed leaf still gets HaLow's actual range to reach the relay; only the relay's own
+  uplink hop rides short-range Wi-Fi. Two XIAOs and no Pi at all is a legitimate deployment on its
+  own - a HaLow Wi-Fi extender, not only an OpenMANET compatibility shim. See `design/ROADMAP.md`
+  item 8 for the full design and its current status: **bench-confirmed on real hardware** - a relay
+  and leaf pair associate, NAT and the CoT relay come up behind the HaLow AP downlink, and CoT
+  passes with 0% loss over a 2000-packet burst - but not yet against a real Pi, and Morse Micro's
+  own HaLow AP-mode API this relies on is still marked alpha. Bring-up runbook (tiered, cheapest
+  first, no Pi needed for the first two tiers): `design/HARDWARE.md` Part 3.
+
+#### Setting up a relay + leaf pair
+
+**Configure the relay first, entirely while it's still reachable as a client.** The config struct
+always holds both roles' fields regardless of which is active, so nothing stops you from filling in
+the relay-only fields before switching `role` - and you should, because once a node becomes a relay
+its local SoftAP goes away and it stops being a network anything can just join.
+
+On the node that will become the relay, while still connected to its default SoftAP
+(`xiao-gateway-xxxx` / `openmanet`) at `http://172.16.50.1/`:
+
+1. Fill in the Wi-Fi uplink section (SSID/password of whatever AP it'll join) and the HaLow AP
+   section (SSID/security/passphrase/op-class/channel). Get legal (op-class, channel) values for
+   this build's region from the serial console first - `gwcfg-list-halow-channels` isn't in the web
+   UI yet.
+2. Set Role to "relay" in the same form.
+3. Click Save once - the form POSTs every section together, so this single save persists the
+   relay's Wi-Fi-uplink config, HaLow-AP config, and the role change all at once.
+4. Reboot.
+
+Equivalently, over the console:
+
+```
+xiao-gw> gwcfg-set-wifi-uplink <target-ssid> <psk|->
+xiao-gw> gwcfg-list-halow-channels
+xiao-gw> gwcfg-set-halow-ap <ssid> <psk|-> <open|sae> <op_class> <s1g_chan_num>
+xiao-gw> gwcfg-set-role relay
+xiao-gw> gwcfg-save
+```
+
+It comes back up already configured: SoftAP gone, native Wi-Fi joining the target AP, HaLow
+advertising as an AP - no second round of setup needed after the reboot.
+
+Then configure each leaf exactly like any other client-role node (see above), pointing its uplink
+at the relay's HaLow SSID instead of a Pi's, with one addition: since a relay's HaLow AP runs no
+DHCP server (see `design/ROADMAP.md` item 8 for why), give it a static address in that subnet too:
+
+```
+xiao-gw> gwcfg-set-uplink <relay-halow-ssid> <psk|-> <open|sae>
+xiao-gw> gwcfg-set-uplink-static-ip <ip> <gateway> <netmask>
+xiao-gw> gwcfg-save
+```
+
+#### Reconfiguring a relay later
+
+A leaf's SoftAP is always there, unaffected by any of this - reconfigure it exactly like before, any
+time. A deployed relay is harder to reach, since it no longer runs a phone-joinable AP. Three ways
+back in, easiest first:
+
+1. **A leaf already associated to it.** Its traffic is NAT'd behind its own static IP in the relay's
+   HaLow AP subnet, which *is* in-subnet from the relay's point of view - so a phone behind that leaf
+   can browse straight to the relay's HaLow AP address (its configured `ip`, default
+   `172.16.60.1`) and reach the relay's web UI through it.
+2. **USB serial console.** Always works regardless of role - the reliable fallback if no leaf is up
+   yet, or you don't have one handy.
+3. **Physical recovery, if the above aren't available or the config is simply wrong**: hold the
+   **BOOT button for 5 seconds**. This resets *all* config to defaults, including `role` back to
+   `client` - so a relay you can't otherwise reach is one button-hold away from a node you can join
+   over its own SoftAP again, the same recovery path any other node has.
+
+There's no dedicated "always reachable regardless of role" management path yet (a small local AP on
+the relay's own native radio, run concurrently with its Wi-Fi uplink, would add one) - not built
+because the workflow above already covers first-time setup, and it's only ongoing field
+reconfiguration that would benefit from it.
+
+## Diagnosing a node
+
+The bring-up instruments, in the order you'd reach for them - full procedure in
+[`design/HARDWARE.md`](design/HARDWARE.md).
+
+**The on-board LED**, which needs neither a cable nor a phone:
+
+| Pattern | Meaning |
+|---|---|
+| Fast triple-blink | HaLow radio never initialized - check wiring/pins/BCF |
+| Slow blink (1 Hz) | Radio up, not associated |
+| Double-blink | Associated, but no DHCP lease |
+| Solid | Uplink up |
+
+(On a relay-role node the LED reflects the *Wi-Fi* uplink to the Pi, not the HaLow AP - there's no
+"radio never initialized" case for the native Wi-Fi radio, so the fast triple-blink pattern is
+never used there.)
+
+**The web UI's status panel** reports the same link state in words, plus uplink RSSI, both
+interfaces' IPs, SoftAP client count, whether the CoT relay started, uptime, free heap and the
+baked-in region. It also has a **scan** button and a **device log** view.
+
+**Serial console**, when the SoftAP itself isn't cooperating:
+
+```
+xiao-gw> gwcfg-status    # link state, RSSI, IPs, relay state, region
+xiao-gw> gwcfg-scan      # which HaLow APs are audible, and on what channel
+xiao-gw> gwcfg-radio     # HaLow BCF/firmware versions - proves SPI to the module works
+xiao-gw> gwcfg-tasks     # per-task stack headroom - the early warning for a crash-reboot loop
+```
+
+**Forgot the SoftAP password, or otherwise locked out?** Hold the **BOOT button for 5 seconds**
+while the node is running (the LED acknowledges after ~1.5s; release to cancel). Config returns to
+defaults and the node reboots. Note this is a runtime hold - holding BOOT at power-on puts the chip
+in the ROM bootloader instead.
+
+## Repo layout
+
+```
+main/
+├── app_main.c          entrypoint: wires everything below together
+├── board.h              XIAO pin assignments (status LED, BOOT button) + HaLow pin collisions
+├── gw_config.h          shared config structs (role/uplink/softap/wifi_uplink/halow_ap/CoT/node)
+├── provisioning.c       NVS-backed config load/save + gwcfg-* console commands
+├── uplink_halow.c       HaLow STA uplink via morsemicro/halow, reconnect/backoff, scan, RSSI (client role)
+├── downlink_softap.c    local 2.4GHz SoftAP + DHCP for phones/tablets/ATAK devices (client role)
+├── uplink_wifi.c        native 2.4GHz esp_wifi STA uplink to the Pi's local AP (relay role)
+├── downlink_halow_ap.c  HaLow radio in AP mode for other XIAOs to join (relay role) - confirmed on
+                        real hardware (leaf associates, NAT + CoT relay come up behind it)
+├── dns_forward.c        DNS forwarding on the relay's downlink for statically-addressed HaLow leaves
+├── ip_forward_nat.c     DNS propagation + uplink as default route + NAPT on the downlink netif
+├── cot_relay.c          ATAK CoT multicast relay (239.2.3.1:6969) between both netifs
+├── status_led.c         on-board LED as a link-state indicator (no cable, no phone needed)
+├── factory_reset.c      BOOT-button hold restores default config
+├── log_buffer.c         in-RAM ring of recent logs, served at /api/log
+├── task_stats.c         per-task stack headroom, served at /api/tasks and by gwcfg-tasks
+├── chip_temp.c          ESP32-S3 die temperature, surfaced in /api/status
+├── link_history.c       30s-sampled RSSI history ring for the web UI's uplink sparkline
+├── heap_guard.c         PSRAM + combined-heap monitor; sheds CoT then pauses SoftAP DHCP under pressure
+├── auth.c               challenge-response web UI login: sessions, lockout, first-use password set
+├── web_ui.c             on-device HTTP config UI, SoftAP clients only (same NVS config as gwcfg-*)
+├── web_ui.html          embedded into the firmware image, not a separate filesystem
+└── minify_web_ui.py     build step: strips comments/indentation from the *embedded copy* of
+                        web_ui.html and gzips it (52,818 -> 10,668 bytes), leaving
+                        the source file commented; web_ui.c serves it with
+                        Content-Encoding: gzip
+partitions.csv           dual-OTA: 2x 3MB app slots + otadata + 64K coredump (app is at 0x20000)
+docs/
+└── index.html           ESP Web Tools browser flasher page (single US build)
+.github/workflows/
+└── build-firmware.yml   builds the firmware + deploys docs/ to GitHub Pages on push
+design/
+├── ROADMAP.md           status, checklist, what's not built yet, settled decisions
+├── HARDWARE.md          BOM, pin map, antennas, power + the bring-up runbook
+└── PI_SIDE.md           the Pi/mesh end of the link: confirmed vs. still to verify
+CLAUDE.md                working rules for anyone changing the firmware
+```

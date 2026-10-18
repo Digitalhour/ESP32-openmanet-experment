@@ -1,0 +1,2158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XIAO HaLow Gateway</title>
+<!-- Design language is shared deliberately with docs/index.html (the web
+     flasher): same custom properties, same mono/body pairing, same HUD
+     bracket panels. Flashing and configuring should read as one product.
+     Everything is inline - this page is embedded in the firmware image and
+     served from a device with no internet access, so an external font or
+     stylesheet would simply never load. -->
+<style>
+  :root {
+    --color-bg: #f3f4f6;
+    --color-surface: #ffffff;
+    --color-surface-subtle: #eaedf1;
+    --color-ink: #171b21;
+    --color-muted: #5c6570;
+    --color-accent: #c1662d;
+    --color-accent-bg: rgba(193, 102, 45, 0.12);
+    --color-line: #dde1e6;
+    --color-ok: #1e7e34;
+    --color-ok-bg: rgba(30, 126, 52, 0.12);
+    --color-warn: #a12622;
+    --color-warn-bg: rgba(161, 38, 34, 0.12);
+    --color-field: #ffffff;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+    --font-body: -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-bg: #12151a;
+      --color-surface: #1a1f26;
+      --color-surface-subtle: #222933;
+      --color-ink: #e8eaed;
+      --color-muted: #9aa3af;
+      --color-accent: #e0924f;
+      --color-accent-bg: rgba(224, 146, 79, 0.15);
+      --color-line: #2a2f38;
+      --color-ok: #5cc27a;
+      --color-ok-bg: rgba(92, 194, 122, 0.15);
+      --color-warn: #f08a80;
+      --color-warn-bg: rgba(240, 138, 128, 0.15);
+      --color-field: #12161c;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: clamp(1rem, 3vw, 2rem) 1rem 6.5rem;
+  }
+
+  button:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  /* --- Top Header & HUD Bar --- */
+  header {
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--color-line);
+    padding-bottom: 1rem;
+  }
+
+  .eyebrow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    margin-bottom: 0.5rem;
+  }
+
+  .eyebrow-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .signal-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; }
+  .signal-bars span { display: block; width: 3px; background: var(--color-accent); border-radius: 1px; }
+  .signal-bars span:nth-child(1) { height: 40%; }
+  .signal-bars span:nth-child(2) { height: 70%; }
+  .signal-bars span:nth-child(3) { height: 100%; }
+
+  .header-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  h1 {
+    font-family: var(--font-mono);
+    font-size: clamp(1.2rem, 3.5vw, 1.45rem);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0;
+    line-height: 1.2;
+  }
+
+  .header-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.2rem 0.55rem;
+    border-radius: 2px;
+  }
+  .badge-accent {
+    background: var(--color-accent-bg);
+    color: var(--color-accent);
+    border: 1px solid var(--color-accent);
+  }
+  .badge-muted {
+    background: var(--color-surface);
+    color: var(--color-muted);
+    border: 1px solid var(--color-line);
+  }
+
+  /* --- Navigation Tab Bar --- */
+  .nav-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.35rem;
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--color-line);
+    padding-bottom: 0.6rem;
+  }
+
+  .tab-btn {
+    background: var(--color-surface);
+    color: var(--color-muted);
+    border: 1px solid var(--color-line);
+    padding: 0.55rem 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: 2px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tab-btn:hover {
+    color: var(--color-ink);
+    border-color: var(--color-accent);
+  }
+  .tab-btn.active {
+    background: var(--color-accent);
+    color: #1a1006;
+    border-color: var(--color-accent);
+  }
+
+  .tab-pane {
+    display: none;
+    animation: fadeIn 0.15s ease;
+  }
+  .tab-pane.active {
+    display: block;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0.6; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* --- HUD Bracketed Cards & Panels --- */
+  .hud-card {
+    position: relative;
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
+    padding: 1rem 1.15rem;
+    margin-bottom: 1rem;
+    border-radius: 3px;
+  }
+  .hud-card::before, .hud-card::after {
+    content: "";
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border: 2px solid var(--color-accent);
+    pointer-events: none;
+  }
+  .hud-card::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+  .hud-card::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid var(--color-line);
+    padding-bottom: 0.4rem;
+  }
+
+  .card-title {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+
+  /* --- Metric Grid & HUD Tiles --- */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 0.75rem 1rem;
+  }
+
+  .metric-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .stat-label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+
+  .stat-value {
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    word-break: break-all;
+    display: flex;
+    align-items: center;
+  }
+
+  .dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+    background: var(--color-muted);
+    flex-shrink: 0;
+  }
+  .dot.up { background: var(--color-ok); box-shadow: 0 0 6px var(--color-ok); }
+  .dot.down { background: var(--color-warn); box-shadow: 0 0 6px var(--color-warn); }
+
+  /* Signal Meter Bars */
+  .rssi-sparkline {
+    display: block;
+    width: 100%;
+    height: 40px;
+    margin-top: 0.25rem;
+  }
+  .signal-meter {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+  .signal-meter span {
+    display: block;
+    width: 3px;
+    background: var(--color-line);
+    border-radius: 1px;
+  }
+  .signal-meter.level-1 span:nth-child(1) { background: var(--color-warn); }
+  .signal-meter.level-2 span:nth-child(1),
+  .signal-meter.level-2 span:nth-child(2) { background: var(--color-accent); }
+  .signal-meter.level-3 span:nth-child(1),
+  .signal-meter.level-3 span:nth-child(2),
+  .signal-meter.level-3 span:nth-child(3) { background: var(--color-ok); }
+  .signal-meter.level-4 span:nth-child(1),
+  .signal-meter.level-4 span:nth-child(2),
+  .signal-meter.level-4 span:nth-child(3),
+  .signal-meter.level-4 span:nth-child(4) { background: var(--color-ok); }
+  .signal-meter span:nth-child(1) { height: 25%; }
+  .signal-meter span:nth-child(2) { height: 50%; }
+  .signal-meter span:nth-child(3) { height: 75%; }
+  .signal-meter span:nth-child(4) { height: 100%; }
+
+  /* --- Form Inputs --- */
+  fieldset { border: 0; padding: 0; margin: 0; }
+  
+  .form-group {
+    margin-bottom: 0.9rem;
+  }
+
+  label {
+    display: block;
+    margin-top: 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+
+  input, select {
+    width: 100%;
+    margin-top: 0.25rem;
+    padding: 0.55rem 0.65rem;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    color: var(--color-ink);
+    background: var(--color-field);
+    border: 1px solid var(--color-line);
+    border-radius: 2px;
+  }
+
+  label.checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    text-transform: none;
+    letter-spacing: normal;
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    cursor: pointer;
+    margin-top: 0.75rem;
+  }
+  label.checkbox input[type="checkbox"] {
+    width: auto;
+    margin-top: 0;
+    cursor: pointer;
+  }
+
+  input::placeholder { color: var(--color-muted); opacity: 0.7; }
+
+  .hint {
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--color-muted);
+    margin: 0.3rem 0 0;
+    font-family: var(--font-body);
+  }
+
+  /* Role Selection Radio Cards */
+  .role-picker {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+    margin-top: 0.35rem;
+  }
+  .role-card {
+    background: var(--color-bg);
+    border: 1px solid var(--color-line);
+    padding: 0.75rem 0.85rem;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .role-card:hover {
+    border-color: var(--color-accent);
+  }
+  .role-card.selected {
+    background: var(--color-accent-bg);
+    border-color: var(--color-accent);
+  }
+  .role-title {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--color-ink);
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+  .role-desc {
+    font-size: 0.72rem;
+    color: var(--color-muted);
+    line-height: 1.35;
+    margin: 0;
+  }
+
+  /* Scan Table */
+  .scan-box {
+    background: var(--color-bg);
+    border: 1px solid var(--color-line);
+    padding: 0.75rem;
+    border-radius: 2px;
+    margin: 0.6rem 0 0.9rem;
+  }
+  .scan-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .scan-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.6rem;
+    font-size: 0.8rem;
+  }
+  .scan-table th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    border-bottom: 1px solid var(--color-line);
+    padding: 0.3rem 0.4rem;
+  }
+  .scan-table td {
+    padding: 0.45rem 0.4rem;
+    border-bottom: 1px solid var(--color-line);
+  }
+  .scan-table tbody tr { cursor: pointer; }
+  .scan-table tbody tr:hover { background: var(--color-surface); }
+  .scan-table .num { font-family: var(--font-mono); font-size: 0.75rem; }
+
+  /* Log Viewer */
+  .log-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+  }
+  .logview {
+    margin: 0;
+    padding: 0.75rem;
+    height: 380px;
+    overflow-y: auto;
+    background: var(--color-bg);
+    border: 1px solid var(--color-line);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-radius: 2px;
+  }
+
+  /* Setup Callout Banner */
+  .setup-banner {
+    display: block;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    border-left: 3px solid var(--color-warn);
+    background: var(--color-warn-bg);
+    border-radius: 2px;
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+  .setup-banner[hidden] { display: none; }
+
+  /* --- Docked Bottom HUD Action Bar --- */
+  .docked-action-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-line);
+    padding: 0.65rem 1rem;
+    z-index: 100;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.15);
+  }
+  .action-bar-inner {
+    max-width: 44rem;
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .action-bar-status {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .action-bar-btns {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  button {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.6rem 1.1rem;
+    border-radius: 2px;
+    cursor: pointer;
+    border: 1px solid var(--color-accent);
+    transition: all 0.15s ease;
+  }
+  button.btn-primary { background: var(--color-accent); color: #1a1006; }
+  button.btn-primary:hover { filter: brightness(1.08); }
+  button.btn-secondary { background: transparent; color: var(--color-accent); }
+  button.btn-secondary:hover { background: var(--color-accent-bg); }
+  button.btn-sm { padding: 0.35rem 0.7rem; font-size: 0.68rem; }
+  button:disabled { opacity: 0.5; cursor: progress; }
+
+  /* Toast Notification */
+  #status {
+    position: fixed;
+    left: 50%;
+    bottom: 4.5rem;
+    transform: translateX(-50%);
+    width: calc(100% - 2rem);
+    max-width: 40rem;
+    padding: 0.65rem 0.9rem;
+    border-radius: 2px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    display: none;
+    z-index: 101;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  }
+  #status.ok { display: block; background: var(--color-ok); color: #fff; }
+  #status.err { display: block; background: var(--color-warn); color: #fff; }
+
+  @media (max-width: 480px) {
+    .nav-tabs { grid-template-columns: repeat(2, 1fr); }
+    .role-picker { grid-template-columns: 1fr; }
+    .action-bar-inner { flex-direction: column; align-items: stretch; gap: 0.4rem; }
+    .action-bar-btns { justify-content: flex-end; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Web UI authentication (design/ROADMAP.md item 1). Shown instead of
+     appShell until initAuth() confirms a session; renders either the login
+     or the forced first-use password-set form depending on password_set. -->
+<div id="authScreen" hidden>
+  <div class="hud-card" style="max-width: 26rem; margin: 4rem auto;">
+    <div class="card-header">
+      <span class="card-title" id="authScreenTitle">Sign In</span>
+    </div>
+
+    <div id="authLoginForm">
+      <div class="form-group">
+        <label for="authLoginPassword">Password</label>
+        <input type="password" id="authLoginPassword" autocomplete="current-password">
+      </div>
+      <p class="hint" id="authLoginHint"></p>
+      <button type="button" class="btn-primary" id="authLoginBtn" style="width:100%; margin-top:0.5rem;">Sign In</button>
+    </div>
+
+    <div id="authSetPasswordForm" hidden>
+      <p class="hint">This node has no admin password yet. Set one to continue - it will be
+        required for all further access, including the config UI you're looking at right now.</p>
+      <div class="form-group">
+        <label for="authSetupSecret">Setup Code</label>
+        <input type="text" id="authSetupSecret" autocomplete="off" spellcheck="false">
+        <p class="hint">Read this off the device's serial console (<code>gwcfg-show-setup-secret</code>,
+          or the one-time line logged at boot) - proves you have physical access, not just Wi-Fi range.</p>
+      </div>
+      <div class="form-group">
+        <label for="authNewPassword">New Password</label>
+        <input type="password" id="authNewPassword" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label for="authNewPasswordConfirm">Confirm Password</label>
+        <input type="password" id="authNewPasswordConfirm" autocomplete="new-password">
+      </div>
+      <p class="hint" id="authSetPasswordHint"></p>
+      <button type="button" class="btn-primary" id="authSetPasswordBtn" style="width:100%; margin-top:0.5rem;">Set Password</button>
+    </div>
+  </div>
+</div>
+
+<div id="appShell" hidden>
+
+<header>
+  <div class="eyebrow">
+    <div class="eyebrow-left">
+      <span class="signal-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+      OpenMANET · Gateway HUD
+    </div>
+    <div id="hdrNode" class="badge badge-muted">—</div>
+  </div>
+  <div class="header-main">
+    <h1>XIAO HaLow Gateway</h1>
+    <div class="header-badges">
+      <span id="hdrRoleBadge" class="badge badge-accent">Client Node</span>
+      <span id="hdrVerBadge" class="badge badge-muted">v—</span>
+    </div>
+  </div>
+</header>
+
+<div id="setupBanner" class="setup-banner" hidden>
+  <strong>Unconfigured Node:</strong> This node does not have an uplink access point configured yet. Switch to the <strong>Wireless</strong> tab to scan for and connect to your mesh Pi (or relay).
+</div>
+
+<!-- Navigation Tabs -->
+<nav class="nav-tabs" role="tablist">
+  <button type="button" class="tab-btn active" data-tab="tab-overview" role="tab" aria-selected="true">[1] Overview</button>
+  <button type="button" class="tab-btn" data-tab="tab-wireless" role="tab" aria-selected="false">[2] Wireless</button>
+  <button type="button" class="tab-btn" data-tab="tab-services" role="tab" aria-selected="false">[3] Services</button>
+  <button type="button" class="tab-btn" data-tab="tab-log" role="tab" aria-selected="false">[4] Log</button>
+</nav>
+
+<form id="cfgForm">
+
+  <!-- TAB 1: OVERVIEW / DASHBOARD -->
+  <section id="tab-overview" class="tab-pane active" role="tabpanel">
+
+    <!-- GW_ROLE_CLIENT cards: HaLow STA uplink + local 2.4GHz SoftAP -->
+    <div id="overviewClient">
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">Mesh Uplink Link</span>
+          <span id="stUplinkType" class="badge badge-muted">HaLow STA</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="stat-label">Link State</span>
+            <span class="stat-value"><span id="dotUplink" class="dot"></span><span id="stUplink">Connecting…</span></span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Signal (RSSI)</span>
+            <span class="stat-value">
+              <span id="stRssi">&mdash;</span>
+              <span id="stRssiMeter" class="signal-meter" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+            </span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Uplink IP</span>
+            <span class="stat-value" id="stUplinkIp">&mdash;</span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Regulatory Domain</span>
+            <span class="stat-value" id="stRegionDomain">US (902-928MHz)</span>
+          </div>
+          <div class="metric-item" style="grid-column: 1 / -1;">
+            <span class="stat-label">RSSI History (last 2h)</span>
+            <canvas id="sparkRssiClient" class="rssi-sparkline"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">Local Access Point</span>
+          <span id="stApType" class="badge badge-muted">2.4GHz SoftAP</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="stat-label">Local IP (Gateway)</span>
+            <span class="stat-value" id="stApIp">&mdash;</span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Connected Clients</span>
+            <span class="stat-value" id="stClients">&mdash;</span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">ATAK CoT Relay</span>
+            <span class="stat-value"><span id="dotCot" class="dot"></span><span id="stCot">&mdash;</span></span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">NAT Forwarding</span>
+            <span class="stat-value" id="stNatStatus">Enabled</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GW_ROLE_RELAY cards: native Wi-Fi STA uplink to the Pi + HaLow AP downlink for leaf XIAOs -->
+    <div id="overviewRelay" hidden>
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">Wi-Fi Uplink Link</span>
+          <span class="badge badge-muted">2.4GHz STA</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="stat-label">Link State</span>
+            <span class="stat-value"><span id="dotWifiUplink" class="dot"></span><span id="stWifiUplink">Connecting…</span></span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Signal (RSSI)</span>
+            <span class="stat-value">
+              <span id="stWifiRssi">&mdash;</span>
+              <span id="stWifiRssiMeter" class="signal-meter" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+            </span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Uplink IP</span>
+            <span class="stat-value" id="stWifiUplinkIp">&mdash;</span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">ATAK CoT Relay</span>
+            <span class="stat-value"><span id="dotCotRelay" class="dot"></span><span id="stCotRelay">&mdash;</span></span>
+          </div>
+          <div class="metric-item" style="grid-column: 1 / -1;">
+            <span class="stat-label">RSSI History (last 2h)</span>
+            <canvas id="sparkRssiRelay" class="rssi-sparkline"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">HaLow AP Downlink</span>
+          <span class="badge badge-accent">Long Range 900MHz</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="stat-label">Radio State</span>
+            <span class="stat-value"><span id="dotHalowAp" class="dot"></span><span id="stHalowAp">&mdash;</span></span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Local IP (Gateway)</span>
+            <span class="stat-value" id="stHalowApIp">&mdash;</span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Associated Leaf XIAOs</span>
+            <span class="stat-value" id="stHalowApClients">&mdash;</span>
+          </div>
+          <div class="metric-item">
+            <span class="stat-label">Regulatory Domain</span>
+            <span class="stat-value" id="stRegionDomainRelay">US (902-928MHz)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- System & Diagnostics Grid Card -->
+    <div class="hud-card">
+      <div class="card-header">
+        <span class="card-title">Hardware & Diagnostics</span>
+        <span class="badge badge-muted">ESP32-S3</span>
+      </div>
+      <div class="metrics-grid">
+        <div class="metric-item">
+          <span class="stat-label">Uptime</span>
+          <span class="stat-value" id="stUptime">&mdash;</span>
+        </div>
+        <div class="metric-item">
+          <span class="stat-label">Free Heap Memory</span>
+          <span class="stat-value" id="stHeap">&mdash;</span>
+        </div>
+        <div class="metric-item">
+          <span class="stat-label">Chip Temp</span>
+          <span class="stat-value" id="stChipTemp">&mdash;</span>
+        </div>
+        <div class="metric-item">
+          <span class="stat-label">Firmware Version</span>
+          <span class="stat-value" id="stVersion">&mdash;</span>
+        </div>
+        <div class="metric-item">
+          <span class="stat-label">Active Slot</span>
+          <span class="stat-value" id="stPartition">&mdash;</span>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- TAB 2: WIRELESS CONFIG & RADIOS -->
+  <section id="tab-wireless" class="tab-pane" role="tabpanel">
+
+    <!-- Role Selection Card -->
+    <div class="hud-card">
+      <div class="card-header">
+        <span class="card-title">Node Role</span>
+      </div>
+      <div class="role-picker">
+        <div class="role-card selected" id="roleCardClient">
+          <span class="role-title">Client (Leaf)</span>
+          <p class="role-desc">Phones/ATAK connect via 2.4GHz Wi-Fi. HaLow carries the mesh uplink to Pi.</p>
+        </div>
+        <div class="role-card" id="roleCardRelay">
+          <span class="role-title">Relay (Bridge)</span>
+          <p class="role-desc">Joins Pi via local Wi-Fi. Broadcasts HaLow AP to connect distant leaf XIAOs.</p>
+        </div>
+      </div>
+      <input type="hidden" id="node_role" value="client">
+      <p class="hint">Role changes dictate which physical radios come up. Requires a reboot to apply.</p>
+
+      <label class="checkbox">
+        <input type="checkbox" id="allow_uplink_management"> Allow management from this node's uplink
+      </label>
+      <p class="hint">
+        Off by default: this config UI is only reachable from clients connected directly to this
+        node (its 2.4GHz SoftAP, or a relay's HaLow AP). Turning this on also allows it from
+        whatever network this node's own uplink joins - useful once a relay has left its own
+        SoftAP behind and is only reachable that way, but only enable it for an uplink network you
+        trust: there is still no login on this page itself.
+      </p>
+    </div>
+
+    <!-- Client Role Fields -->
+    <div id="clientFields">
+      <!-- HaLow Uplink -->
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">HaLow Uplink STA</span>
+          <span class="badge badge-accent">Long Range 900MHz</span>
+        </div>
+
+        <div class="scan-box">
+          <div class="scan-actions">
+            <span class="stat-label">Airwaves Scanner</span>
+            <button type="button" class="btn-secondary btn-sm" id="scanBtn">Scan for HaLow APs</button>
+          </div>
+          <p class="hint" id="scanNote">
+            Scanning covers US legal channels (902–928 MHz). Click a row to adopt its SSID.
+          </p>
+          <div id="scanResults"></div>
+        </div>
+
+        <div class="form-group">
+          <label for="uplink_ssid">HaLow AP SSID</label>
+          <input type="text" id="uplink_ssid" maxlength="32" autocomplete="off" placeholder="Pi or Relay HaLow SSID">
+        </div>
+
+        <div class="form-group">
+          <label for="uplink_security">Security Mode</label>
+          <select id="uplink_security">
+            <option value="open">Open (No password)</option>
+            <option value="owe">OWE (Opportunistic Wireless Encryption)</option>
+            <option value="sae">SAE (WPA3-Personal)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="uplink_psk">SAE Passphrase</label>
+          <input type="password" id="uplink_psk" maxlength="64" autocomplete="new-password" placeholder="Leave blank to keep current">
+          <p class="hint">Only used if security is SAE. HaLow does not support legacy WPA2-PSK.</p>
+        </div>
+
+        <label class="checkbox">
+          <input type="checkbox" id="uplink_use_static_ip"> Use static IP on HaLow uplink
+        </label>
+        <p class="hint">Required when associating to a Relay node (since HaLow AP runs without DHCP).</p>
+
+        <div id="staticIpFields" style="display: none; margin-top: 0.5rem;">
+          <div class="form-group">
+            <label for="uplink_static_ip">Static IP Address</label>
+            <input type="text" id="uplink_static_ip" placeholder="172.16.60.2">
+          </div>
+          <div class="form-group">
+            <label for="uplink_static_gateway">Gateway IP</label>
+            <input type="text" id="uplink_static_gateway" placeholder="172.16.60.1">
+          </div>
+          <div class="form-group">
+            <label for="uplink_static_netmask">Subnet Mask</label>
+            <input type="text" id="uplink_static_netmask" placeholder="255.255.255.0">
+          </div>
+          <div class="form-group">
+            <label for="uplink_static_dns">DNS Server (optional)</label>
+            <input type="text" id="uplink_static_dns" placeholder="172.16.60.1">
+            <p class="hint">A static uplink has no DHCP lease to learn a DNS server from. Point
+              this at the relay's own downlink address, not a public resolver - the relay
+              forwards queries from there using its own real upstream DNS server. Leave blank
+              for no name resolution on this hop.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Local SoftAP Wi-Fi -->
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">Local 2.4GHz Wi-Fi (SoftAP)</span>
+          <span class="badge badge-muted">Phone / ATAK Access</span>
+        </div>
+        <div class="form-group">
+          <label for="softap_ssid">Wi-Fi SSID</label>
+          <input type="text" id="softap_ssid" maxlength="32" autocomplete="off" placeholder="xiao-gateway">
+        </div>
+        <div class="form-group">
+          <label for="softap_psk">Wi-Fi Passphrase</label>
+          <input type="password" id="softap_psk" maxlength="64" autocomplete="new-password" placeholder="Leave blank to keep current">
+          <p class="hint">8–63 chars. Blank preserves existing password. SoftAP subnet is 172.16.50.0/24.</p>
+        </div>
+        <div class="form-group">
+          <label for="softap_channel">Wi-Fi Channel</label>
+          <input type="number" id="softap_channel" min="1" max="13" placeholder="6">
+        </div>
+      </div>
+    </div>
+
+    <!-- Relay Role Fields -->
+    <div id="relayFields" hidden>
+      <!-- Wi-Fi Uplink to Pi -->
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">Wi-Fi Uplink (To Mesh Pi)</span>
+          <span class="badge badge-accent">2.4GHz STA</span>
+        </div>
+        <div class="form-group">
+          <label for="wifi_uplink_ssid">Pi Wi-Fi SSID</label>
+          <input type="text" id="wifi_uplink_ssid" maxlength="32" autocomplete="off" placeholder="Pi Local AP SSID">
+        </div>
+        <div class="form-group">
+          <label for="wifi_uplink_psk">Pi Wi-Fi Passphrase</label>
+          <input type="password" id="wifi_uplink_psk" maxlength="64" autocomplete="new-password" placeholder="Leave blank to keep current">
+        </div>
+      </div>
+
+      <!-- HaLow AP Downlink -->
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">HaLow AP (To Leaf Nodes)</span>
+          <span class="badge badge-accent">900MHz AP Mode</span>
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_ssid">HaLow AP SSID</label>
+          <input type="text" id="halow_ap_ssid" maxlength="32" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_security">Security</label>
+          <select id="halow_ap_security">
+            <option value="open">Open</option>
+            <option value="sae">SAE (WPA3)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_psk">Passphrase</label>
+          <input type="password" id="halow_ap_psk" maxlength="64" autocomplete="new-password" placeholder="Leave blank to keep current">
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_bw_select">HaLow AP Bandwidth</label>
+          <select id="halow_ap_bw_select">
+            <option value="4">4 MHz (Standard / Recommended)</option>
+            <option value="8">8 MHz (High Speed)</option>
+            <option value="2">2 MHz (Balanced)</option>
+            <option value="1">1 MHz (Longest Range)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_chan_select">Center Frequency &amp; Channel</label>
+          <select id="halow_ap_chan_select">
+            <option value="">Loading channels…</option>
+          </select>
+          <input type="hidden" id="halow_ap_op_class" value="3">
+          <input type="hidden" id="halow_ap_chan_num" value="1">
+          <p class="hint">
+            Selecting bandwidth gates the available legal US channels (902–928 MHz).
+          </p>
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_max_stas">Max Connected Nodes</label>
+          <input type="number" id="halow_ap_max_stas" min="0" max="20" placeholder="0 = default (4)">
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_ip">Relay AP IP</label>
+          <input type="text" id="halow_ap_ip" placeholder="172.16.60.1">
+        </div>
+        <div class="form-group">
+          <label for="halow_ap_netmask">Relay Subnet Mask</label>
+          <input type="text" id="halow_ap_netmask" placeholder="255.255.255.0">
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- TAB 3: SERVICES & ATAK -->
+  <section id="tab-services" class="tab-pane" role="tabpanel">
+
+    <!-- Node Identity -->
+    <div class="hud-card">
+      <div class="card-header">
+        <span class="card-title">Node Identification</span>
+      </div>
+      <div class="form-group">
+        <label for="node_id">Node Name / Callsign</label>
+        <input type="text" id="node_id" maxlength="32" autocomplete="off" placeholder="e.g. xiao-gw-alpha">
+        <p class="hint">Displayed in network scans, logs, and mesh management consoles.</p>
+      </div>
+    </div>
+
+    <!-- ATAK CoT Relay -->
+    <div class="hud-card">
+      <div class="card-header">
+        <span class="card-title">ATAK Cursor-on-Target (CoT) Relay</span>
+        <span class="badge badge-accent">UDP Multicast</span>
+      </div>
+      <p class="hint" style="margin-bottom: 0.75rem;">
+        Bi-directional bridge forwarding ATAK situational awareness multicast packets between the local SoftAP subnet and the HaLow mesh uplink with hardware loop suppression.
+      </p>
+      <div class="form-group">
+        <label for="cot_group">Multicast IP Group</label>
+        <input type="text" id="cot_group" maxlength="15" autocomplete="off" placeholder="239.2.3.1">
+      </div>
+      <div class="form-group">
+        <label for="cot_port">Multicast Port</label>
+        <input type="number" id="cot_port" min="1" max="65535" placeholder="6969">
+      </div>
+    </div>
+
+  </section>
+
+  <!-- TAB 4: LIVE TERMINAL LOGS -->
+  <section id="tab-log" class="tab-pane" role="tabpanel">
+    <div class="hud-card">
+      <div class="card-header">
+        <span class="card-title">Live Device Serial Ring</span>
+        <span class="badge badge-muted">RAM Buffer</span>
+      </div>
+      <div class="log-toolbar">
+        <div style="display:flex; gap:0.4rem;">
+          <button type="button" class="btn-secondary btn-sm" id="logBtn">Refresh Log</button>
+          <button type="button" class="btn-secondary btn-sm" id="logAutoBtn">Auto-refresh: off</button>
+        </div>
+        <button type="button" class="btn-secondary btn-sm" id="copyLogBtn">Copy Log</button>
+      </div>
+      <pre id="logView" class="logview" aria-live="polite">Click "Refresh Log" to load buffered messages.</pre>
+    </div>
+
+    <!-- Stack headroom.
+         Lives on the log tab because it answers the same question the log does
+         after an unexplained reboot: "was this a crash, and where?" A stack
+         overflow gives no warning in the log itself - the node simply panics -
+         so this is the only place the warning can appear beforehand. -->
+    <div class="hud-card">
+      <div class="card-header">
+        <span class="card-title">Task Stack Headroom</span>
+        <span class="badge badge-muted">Diagnostic</span>
+      </div>
+      <div class="log-toolbar">
+        <button type="button" class="btn-secondary btn-sm" id="tasksBtn">Check Stacks</button>
+      </div>
+      <div id="tasksOut"></div>
+      <p class="hint">FREE is the least stack this task has ever had spare since boot. It only
+        reflects code paths that have actually run, so check again after the node has been up a
+        while and through a reconnect or two.</p>
+    </div>
+  </section>
+
+</form>
+
+<!-- Docked Bottom Action Bar -->
+<aside class="docked-action-bar" aria-label="Configuration actions">
+  <div class="action-bar-inner">
+    <div class="action-bar-status" id="actionBarStatus">Ready</div>
+    <div class="action-bar-btns">
+      <button type="button" class="btn-secondary" id="rebootBtn">Reboot</button>
+      <button type="button" class="btn-primary" id="saveBtn">Save Config</button>
+    </div>
+  </div>
+</aside>
+
+</div>
+
+<div id="status" role="status" aria-live="polite"></div>
+
+<script>
+/* GW crypto: SHA-256, HMAC-SHA256, PBKDF2-HMAC-SHA256 - ES5, byte-array
+ * based, ~2KB (design/ROADMAP.md item 1's settled "bundled ~2KB SHA-256/HMAC"
+ * decision - crypto.subtle is unavailable in insecure contexts, and
+ * http://172.16.50.1 is not one).
+ *
+ * The SHA-256 core (GWSHA256_K, gwsha256Rotr, gwsha256Compress, gwSha256) is
+ * ported from Chris Veness's public-domain reference implementation
+ * (github.com/chrisveness/crypto, sha256.js, MIT licence) - same constants
+ * and compression logic verbatim, adapted from its ES6-class/char-code-string
+ * form to plain ES5 (var, function expressions, no class/arrow/let/const)
+ * operating on byte arrays directly, matching this file's own style and
+ * main/minify_web_ui.py's proven-safe assumptions. HMAC-SHA256 (RFC 2104)
+ * and PBKDF2-HMAC-SHA256 (PKCS#5/RFC 8018) on top are new, thin composition
+ * code - textbook algorithm, nothing novel. Verified against NIST's SHA-256
+ * test vectors, RFC 4231's HMAC-SHA256 test cases, and PBKDF2-HMAC-SHA256
+ * output cross-checked against Python's hashlib.pbkdf2_hmac before this ever
+ * touched a real password. */
+'use strict';
+
+var GWSHA256_K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+function gwsha256Rotr(n, x) {
+    return (x >>> n) | (x << (32 - n));
+}
+
+function gwsha256Compress(H, W) {
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    var t, T1, T2, S0, S1, ch, maj;
+    for (t = 0; t < 64; t++) {
+        S1 = gwsha256Rotr(6, e) ^ gwsha256Rotr(11, e) ^ gwsha256Rotr(25, e);
+        ch = (e & f) ^ (~e & g);
+        T1 = (h + S1 + ch + GWSHA256_K[t] + W[t]) >>> 0;
+        S0 = gwsha256Rotr(2, a) ^ gwsha256Rotr(13, a) ^ gwsha256Rotr(22, a);
+        maj = (a & b) ^ (a & c) ^ (b & c);
+        T2 = (S0 + maj) >>> 0;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + T1) >>> 0;
+        d = c;
+        c = b;
+        b = a;
+        a = (T1 + T2) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0;
+    H[1] = (H[1] + b) >>> 0;
+    H[2] = (H[2] + c) >>> 0;
+    H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0;
+    H[5] = (H[5] + f) >>> 0;
+    H[6] = (H[6] + g) >>> 0;
+    H[7] = (H[7] + h) >>> 0;
+}
+
+function gwSha256(bytes) {
+    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+
+    var bitLen = bytes.length * 8;
+    var bitLenHi = Math.floor(bitLen / 4294967296);
+    var bitLenLo = bitLen >>> 0;
+
+    var padded = bytes.slice();
+    padded.push(0x80);
+    while ((padded.length % 64) !== 56) {
+        padded.push(0x00);
+    }
+    padded.push((bitLenHi >>> 24) & 0xff, (bitLenHi >>> 16) & 0xff, (bitLenHi >>> 8) & 0xff, bitLenHi & 0xff);
+    padded.push((bitLenLo >>> 24) & 0xff, (bitLenLo >>> 16) & 0xff, (bitLenLo >>> 8) & 0xff, bitLenLo & 0xff);
+
+    var blockCount = padded.length / 64;
+    var blockIdx, t, W, i, s0, s1;
+    for (blockIdx = 0; blockIdx < blockCount; blockIdx++) {
+        W = new Array(64);
+        for (t = 0; t < 16; t++) {
+            i = blockIdx * 64 + t * 4;
+            W[t] = ((padded[i] << 24) | (padded[i + 1] << 16) | (padded[i + 2] << 8) | padded[i + 3]) >>> 0;
+        }
+        for (t = 16; t < 64; t++) {
+            s0 = gwsha256Rotr(7, W[t - 15]) ^ gwsha256Rotr(18, W[t - 15]) ^ (W[t - 15] >>> 3);
+            s1 = gwsha256Rotr(17, W[t - 2]) ^ gwsha256Rotr(19, W[t - 2]) ^ (W[t - 2] >>> 10);
+            W[t] = (W[t - 16] + s0 + W[t - 7] + s1) >>> 0;
+        }
+        gwsha256Compress(H, W);
+    }
+
+    var out = [];
+    for (i = 0; i < 8; i++) {
+        out.push((H[i] >>> 24) & 0xff, (H[i] >>> 16) & 0xff, (H[i] >>> 8) & 0xff, H[i] & 0xff);
+    }
+    return out;
+}
+
+function gwHmacSha256(keyBytes, messageBytes) {
+    var blockSize = 64;
+    var key = keyBytes.slice();
+    if (key.length > blockSize) {
+        key = gwSha256(key);
+    }
+    while (key.length < blockSize) {
+        key.push(0x00);
+    }
+    var ipad = new Array(blockSize);
+    var opad = new Array(blockSize);
+    var i;
+    for (i = 0; i < blockSize; i++) {
+        ipad[i] = key[i] ^ 0x36;
+        opad[i] = key[i] ^ 0x5c;
+    }
+    var inner = gwSha256(ipad.concat(messageBytes));
+    return gwSha256(opad.concat(inner));
+}
+
+function gwPbkdf2Sha256(passwordBytes, saltBytes, iterations, dkLenBytes) {
+    var hLen = 32;
+    var blockCount = Math.ceil(dkLenBytes / hLen);
+    var derived = [];
+    var blockIndex, i, j, u, t, intBlock;
+    for (blockIndex = 1; blockIndex <= blockCount; blockIndex++) {
+        intBlock = [
+            (blockIndex >>> 24) & 0xff,
+            (blockIndex >>> 16) & 0xff,
+            (blockIndex >>> 8) & 0xff,
+            blockIndex & 0xff
+        ];
+        u = gwHmacSha256(passwordBytes, saltBytes.concat(intBlock));
+        t = u.slice();
+        for (i = 1; i < iterations; i++) {
+            u = gwHmacSha256(passwordBytes, u);
+            for (j = 0; j < hLen; j++) {
+                t[j] ^= u[j];
+            }
+        }
+        derived = derived.concat(t);
+    }
+    return derived.slice(0, dkLenBytes);
+}
+
+function gwBytesToHex(bytes) {
+    var hex = '';
+    var digits = '0123456789abcdef';
+    var i, b;
+    for (i = 0; i < bytes.length; i++) {
+        b = bytes[i];
+        hex += digits.charAt((b >> 4) & 0xf) + digits.charAt(b & 0xf);
+    }
+    return hex;
+}
+
+function gwHexToBytes(hex) {
+    var bytes = [];
+    var i;
+    for (i = 0; i < hex.length; i += 2) {
+        bytes.push(parseInt(hex.substr(i, 2), 16));
+    }
+    return bytes;
+}
+
+function gwUtf8Bytes(str) {
+    var bytes = [];
+    var i, code, hi, lo, cp;
+    for (i = 0; i < str.length; i++) {
+        code = str.charCodeAt(i);
+        if (code < 0x80) {
+            bytes.push(code);
+        } else if (code < 0x800) {
+            bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+        } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
+            hi = code;
+            lo = str.charCodeAt(++i);
+            cp = 0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00);
+            bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        } else {
+            bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+        }
+    }
+    return bytes;
+}
+
+var gwCrypto = {
+    pbkdf2Sha256Hex: function (password, saltHex, iterations, dkLenBytes) {
+        var derived = gwPbkdf2Sha256(gwUtf8Bytes(password), gwHexToBytes(saltHex), iterations, dkLenBytes);
+        return gwBytesToHex(derived);
+    },
+    hmacSha256Hex: function (keyHex, messageHex) {
+        var mac = gwHmacSha256(gwHexToBytes(keyHex), gwHexToBytes(messageHex));
+        return gwBytesToHex(mac);
+    }
+};
+</script>
+
+<script>
+'use strict';
+
+var statusTimer = null;
+var scanning = false;
+var logTimer = null;
+
+function el(id) { return document.getElementById(id); }
+
+function showStatus(msg, ok) {
+  var s = el('status');
+  var bar = el('actionBarStatus');
+  s.textContent = msg;
+  s.className = ok ? 'ok' : 'err';
+  if (bar) bar.textContent = msg;
+  clearTimeout(showStatus._t);
+  if (ok) showStatus._t = setTimeout(function () { s.className = ''; }, 4000);
+}
+
+/* Web UI authentication (design/ROADMAP.md item 1). authScreen and appShell
+ * are mutually exclusive - #status stays a sibling of both (not inside
+ * either) so showStatus() keeps working on the login screen too. */
+function showAuthScreen(mode, message) {
+  el('appShell').hidden = true;
+  el('authScreen').hidden = false;
+  var isSetPassword = mode === 'set-password';
+  el('authLoginForm').hidden = isSetPassword;
+  el('authSetPasswordForm').hidden = !isSetPassword;
+  el('authScreenTitle').textContent = isSetPassword ? 'Set Admin Password' : 'Sign In';
+  if (isSetPassword) {
+    el('authSetPasswordHint').textContent = message || '';
+  } else {
+    el('authLoginHint').textContent = message || '';
+  }
+}
+
+function showApp() {
+  el('authScreen').hidden = true;
+  el('appShell').hidden = false;
+  initChannelList();
+  loadConfig();
+  loadStatus();
+  statusTimer = setInterval(loadStatus, 5000);
+  loadRssiHistory();
+  setInterval(loadRssiHistory, 30000);
+}
+
+/* Called from every fetch() below on a 401 - an idle-timed-out or otherwise
+ * invalidated session (e.g. a concurrent gwcfg-reset-auth). Stops the
+ * pollers so they don't keep hammering a session that no longer exists. */
+function handleAuthExpiry() {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  if (logTimer) { clearInterval(logTimer); logTimer = null; }
+  showAuthScreen('login', 'Your session expired - please sign in again.');
+}
+
+function fmtUptime(sec) {
+  if (typeof sec !== 'number') return '—';
+  var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600);
+  var m = Math.floor(sec % 3600 / 60), s = Math.floor(sec % 60);
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm ' + s + 's';
+  return s + 's';
+}
+
+function setDot(id, up) {
+  var d = el(id);
+  if (d) d.className = 'dot ' + (up ? 'up' : 'down');
+}
+
+function updateRssiMeter(rssi, meterId) {
+  var meter = el(meterId || 'stRssiMeter');
+  if (!meter) return;
+  meter.className = 'signal-meter';
+  if (typeof rssi !== 'number' || rssi === -999) return;
+  if (rssi >= -65) meter.classList.add('level-4');
+  else if (rssi >= -75) meter.classList.add('level-3');
+  else if (rssi >= -85) meter.classList.add('level-2');
+  else meter.classList.add('level-1');
+}
+
+/* Plain <canvas>, not a library - the whole point of the minify+gzip step
+ * (main/minify_web_ui.py) is keeping this embedded page small, and a
+ * dozen-line line-chart doesn't earn a dependency. `values` is oldest-first,
+ * matching /api/rssi-history's own order; null entries (link_history.c's
+ * "no reading yet" gaps) break the line rather than being interpolated
+ * through, so a gap in coverage reads as a gap, not a fabricated trend. */
+function drawSparkline(canvasId, values) {
+  var canvas = el(canvasId);
+  if (!canvas) return;
+
+  var cssWidth = canvas.clientWidth || 300;
+  var cssHeight = canvas.clientHeight || 40;
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = cssWidth * dpr;
+  canvas.height = cssHeight * dpr;
+
+  var ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  var known = values.filter(function (v) { return typeof v === 'number'; });
+  if (known.length === 0) return;
+
+  var min = Math.min.apply(null, known);
+  var max = Math.max.apply(null, known);
+  /* Flat line still gets drawn mid-height rather than dividing by zero below. */
+  if (min === max) { min -= 1; max += 1; }
+
+  var pad = 2;
+  var xStep = values.length > 1 ? (cssWidth - pad * 2) / (values.length - 1) : 0;
+  var style = getComputedStyle(document.documentElement);
+  ctx.strokeStyle = style.getPropertyValue('--color-accent').trim() || '#c1662d';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+
+  var drawing = false;
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+    if (typeof v !== 'number') { drawing = false; continue; }
+    var x = pad + i * xStep;
+    var y = pad + (1 - (v - min) / (max - min)) * (cssHeight - pad * 2);
+    if (!drawing) { ctx.moveTo(x, y); drawing = true; }
+    else { ctx.lineTo(x, y); }
+  }
+  ctx.stroke();
+}
+
+async function loadRssiHistory() {
+  try {
+    var res = await fetch('/api/rssi-history', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
+    var samples = data.rssi_dbm || [];
+    /* Both cards' canvases exist in the DOM regardless of role (only one is
+     * visible via the parent's [hidden]) - drawing into the hidden one too
+     * is cheap and means it's already current if the operator switches role. */
+    drawSparkline('sparkRssiClient', samples);
+    drawSparkline('sparkRssiRelay', samples);
+  } catch (e) {
+    /* Best-effort only - a missed history point isn't worth surfacing an
+     * error banner over, unlike loadStatus()'s failures. */
+  }
+}
+
+// Tab Switching
+document.querySelectorAll('.tab-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.tab-btn').forEach(function(b) {
+      b.classList.remove('active');
+      b.setAttribute('aria-selected', 'false');
+    });
+    document.querySelectorAll('.tab-pane').forEach(function(p) {
+      p.classList.remove('active');
+    });
+    btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
+    var pane = el(btn.dataset.tab);
+    if (pane) pane.classList.add('active');
+
+    // Auto load log if switching to log tab
+    if (btn.dataset.tab === 'tab-log') {
+      loadLog();
+    }
+  });
+});
+
+// Role Switcher Cards
+function setRole(role) {
+  el('node_role').value = role;
+  if (role === 'relay') {
+    el('roleCardRelay').classList.add('selected');
+    el('roleCardClient').classList.remove('selected');
+    el('clientFields').hidden = true;
+    el('relayFields').hidden = false;
+    el('hdrRoleBadge').textContent = 'Relay Bridge';
+    el('stUplinkType').textContent = 'Wi-Fi STA (To Pi)';
+    el('stApType').textContent = 'HaLow AP (To Leaves)';
+  } else {
+    el('roleCardClient').classList.add('selected');
+    el('roleCardRelay').classList.remove('selected');
+    el('clientFields').hidden = false;
+    el('relayFields').hidden = true;
+    el('hdrRoleBadge').textContent = 'Client Node';
+    el('stUplinkType').textContent = 'HaLow STA (US)';
+    el('stApType').textContent = '2.4GHz SoftAP';
+  }
+}
+
+el('roleCardClient').addEventListener('click', function() { setRole('client'); });
+el('roleCardRelay').addEventListener('click', function() { setRole('relay'); });
+
+// Static IP checkbox toggle
+el('uplink_use_static_ip').addEventListener('change', function() {
+  el('staticIpFields').style.display = this.checked ? 'block' : 'none';
+});
+
+async function loadStatus() {
+  if (scanning) return;
+  try {
+    var res = await fetch('/api/status', { cache: 'no-store' });
+    if (res.status === 401) { handleAuthExpiry(); return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var s = await res.json();
+
+    el('hdrNode').textContent = s.node_id || 'xiao-gw';
+
+    var isRelay = s.role === 'relay';
+    el('overviewClient').hidden = isRelay;
+    el('overviewRelay').hidden = !isRelay;
+
+    if (isRelay) {
+      var wu = s.wifi_uplink || {};
+      var wup = !!wu.connected;
+      setDot('dotWifiUplink', wup);
+      el('stWifiUplink').textContent = wu.state || (wup ? 'Connected' : 'Down');
+      el('stWifiRssi').textContent = (typeof wu.rssi === 'number') ? (wu.rssi + ' dBm') : '—';
+      updateRssiMeter(wu.rssi, 'stWifiRssiMeter');
+      el('stWifiUplinkIp').textContent = wu.ip || 'no lease';
+
+      var ha = s.halow_ap || {};
+      setDot('dotHalowAp', !!ha.ready);
+      el('stHalowAp').textContent = ha.started ? 'AP started' : (ha.ready ? 'radio up, AP not started' : 'not ready');
+      el('stHalowApIp').textContent = ha.ip || '—';
+      var hc = (typeof ha.connected_clients === 'number') ? ha.connected_clients : -1;
+      el('stHalowApClients').textContent = (hc < 0) ? 'n/a' : (String(hc) + ' XIAO' + (hc === 1 ? '' : 's'));
+
+      var cotR = !!(s.cot && s.cot.running);
+      setDot('dotCotRelay', cotR);
+      el('stCotRelay').textContent = cotR ? (s.cot.group + ':' + s.cot.port) : (wup ? 'Stopped' : 'Waiting');
+    } else {
+      var u = s.uplink || {};
+      var up = !!u.connected;
+      setDot('dotUplink', up);
+      el('stUplink').textContent = u.state || (up ? 'Connected' : 'Down');
+      el('setupBanner').hidden = (u.configured !== false);
+
+      var rssiVal = (typeof u.rssi === 'number') ? (u.rssi + ' dBm') : '—';
+      el('stRssi').textContent = rssiVal;
+      updateRssiMeter(u.rssi, 'stRssiMeter');
+
+      el('stUplinkIp').textContent = u.ip || 'no lease';
+      el('stApIp').textContent = (s.softap && s.softap.ip) || '—';
+
+      var c = s.softap ? s.softap.clients : -1;
+      el('stClients').textContent = (c < 0) ? 'n/a' : (String(c) + ' device' + (c === 1 ? '' : 's'));
+
+      var cot = !!(s.cot && s.cot.running);
+      setDot('dotCot', cot);
+      el('stCot').textContent = cot ? (s.cot.group + ':' + s.cot.port) : (up ? 'Stopped' : 'Waiting');
+    }
+
+    if (s.system) {
+      el('stUptime').textContent = fmtUptime(s.system.uptime_s);
+      el('stHeap').textContent = Math.round(s.system.heap_free / 1024) + ' KB';
+      var chipTempEl = el('stChipTemp');
+      if (s.system.chip_temp_c === null || s.system.chip_temp_c === undefined) {
+        chipTempEl.textContent = 'n/a';
+        chipTempEl.style.color = '';
+      } else {
+        chipTempEl.textContent = Math.round(s.system.chip_temp_c) + '°C';
+        /* 80C is not a datasheet limit, just a "worth a look" line for an
+         * ESP32-S3 die reading in an enclosure - same inline-warn pattern as
+         * the stack-headroom table below (t.free < 256). */
+        chipTempEl.style.color = s.system.chip_temp_c >= 80 ? 'var(--color-warn)' : '';
+      }
+      el('stVersion').textContent = s.system.version ? ('v' + s.system.version) : '—';
+      el('hdrVerBadge').textContent = s.system.version ? ('v' + s.system.version.substring(0, 7)) : 'v—';
+      el('stPartition').textContent = s.system.partition || 'ota_0';
+      el('stRegionDomain').textContent = (s.system.country || 'US') + ' (902-928MHz)';
+      el('stRegionDomainRelay').textContent = (s.system.country || 'US') + ' (902-928MHz)';
+    }
+  } catch (e) {
+    setDot('dotUplink', false);
+    setDot('dotCot', false);
+    setDot('dotWifiUplink', false);
+    setDot('dotHalowAp', false);
+    setDot('dotCotRelay', false);
+    el('stUplink').textContent = 'unreachable';
+    el('stWifiUplink').textContent = 'unreachable';
+  }
+}
+
+var DEFAULT_US_CHANNELS = [
+  { op_class: 3, chan_num: 1, freq_hz: 904000000, bw_mhz: 4 },
+  { op_class: 3, chan_num: 2, freq_hz: 908000000, bw_mhz: 4 },
+  { op_class: 3, chan_num: 3, freq_hz: 912000000, bw_mhz: 4 },
+  { op_class: 3, chan_num: 4, freq_hz: 916000000, bw_mhz: 4 },
+  { op_class: 3, chan_num: 5, freq_hz: 920000000, bw_mhz: 4 },
+  { op_class: 3, chan_num: 6, freq_hz: 924000000, bw_mhz: 4 },
+  { op_class: 4, chan_num: 1, freq_hz: 906000000, bw_mhz: 8 },
+  { op_class: 4, chan_num: 2, freq_hz: 914000000, bw_mhz: 8 },
+  { op_class: 4, chan_num: 3, freq_hz: 922000000, bw_mhz: 8 },
+  { op_class: 2, chan_num: 1, freq_hz: 903000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 2, freq_hz: 905000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 3, freq_hz: 907000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 4, freq_hz: 909000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 5, freq_hz: 911000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 6, freq_hz: 913000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 7, freq_hz: 915000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 8, freq_hz: 917000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 9, freq_hz: 919000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 10, freq_hz: 921000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 11, freq_hz: 923000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 12, freq_hz: 925000000, bw_mhz: 2 },
+  { op_class: 2, chan_num: 13, freq_hz: 927000000, bw_mhz: 2 },
+  { op_class: 1, chan_num: 1, freq_hz: 902500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 2, freq_hz: 903500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 3, freq_hz: 904500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 4, freq_hz: 905500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 5, freq_hz: 906500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 6, freq_hz: 907500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 7, freq_hz: 908500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 8, freq_hz: 909500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 9, freq_hz: 910500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 10, freq_hz: 911500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 11, freq_hz: 912500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 12, freq_hz: 913500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 13, freq_hz: 914500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 14, freq_hz: 915500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 15, freq_hz: 916500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 16, freq_hz: 917500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 17, freq_hz: 918500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 18, freq_hz: 919500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 19, freq_hz: 920500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 20, freq_hz: 921500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 21, freq_hz: 922500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 22, freq_hz: 923500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 23, freq_hz: 924500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 24, freq_hz: 925500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 25, freq_hz: 926500000, bw_mhz: 1 },
+  { op_class: 1, chan_num: 26, freq_hz: 927500000, bw_mhz: 1 }
+];
+
+var activeChannelsList = DEFAULT_US_CHANNELS;
+
+function updateChannelsForBw(bwMhz, targetOpClass, targetChanNum) {
+  var chanSel = el('halow_ap_chan_select');
+  if (!chanSel) return;
+  var bw = parseInt(bwMhz, 10) || 4;
+  var filtered = activeChannelsList.filter(function(c) { return c.bw_mhz === bw; });
+  
+  chanSel.innerHTML = '';
+  filtered.forEach(function(c) {
+    var opt = document.createElement('option');
+    opt.value = c.op_class + '_' + c.chan_num;
+    var freqMhz = (c.freq_hz / 1000000).toFixed(1);
+    opt.textContent = freqMhz + ' MHz  (Channel ' + c.chan_num + ' · OpClass ' + c.op_class + ')';
+    chanSel.appendChild(opt);
+  });
+
+  var targetVal = (targetOpClass && targetChanNum) ? (targetOpClass + '_' + targetChanNum) : '';
+  if (targetVal && filtered.some(function(c) { return (c.op_class + '_' + c.chan_num) === targetVal; })) {
+    chanSel.value = targetVal;
+    el('halow_ap_op_class').value = String(targetOpClass);
+    el('halow_ap_chan_num').value = String(targetChanNum);
+  } else if (filtered.length > 0) {
+    chanSel.value = filtered[0].op_class + '_' + filtered[0].chan_num;
+    el('halow_ap_op_class').value = String(filtered[0].op_class);
+    el('halow_ap_chan_num').value = String(filtered[0].chan_num);
+  }
+}
+
+el('halow_ap_bw_select').addEventListener('change', function() {
+  updateChannelsForBw(this.value);
+});
+
+el('halow_ap_chan_select').addEventListener('change', function() {
+  var parts = this.value.split('_');
+  if (parts.length === 2) {
+    el('halow_ap_op_class').value = parts[0];
+    el('halow_ap_chan_num').value = parts[1];
+  }
+});
+
+function syncSelectedChannel(opClass, chanNum) {
+  var match = activeChannelsList.find(function(c) {
+    return c.op_class === opClass && c.chan_num === chanNum;
+  });
+  if (match) {
+    el('halow_ap_bw_select').value = String(match.bw_mhz);
+    updateChannelsForBw(match.bw_mhz, opClass, chanNum);
+  } else {
+    el('halow_ap_bw_select').value = '4';
+    updateChannelsForBw(4, 3, 1);
+  }
+}
+
+async function initChannelList() {
+  updateChannelsForBw(el('halow_ap_bw_select').value || 4);
+  try {
+    var res = await fetch('/api/channels', { cache: 'no-store' });
+    if (res.ok) {
+      var data = await res.json();
+      if (data && Array.isArray(data.channels) && data.channels.length > 0) {
+        activeChannelsList = data.channels;
+        var curBw = el('halow_ap_bw_select').value;
+        var curOp = parseInt(el('halow_ap_op_class').value, 10);
+        var curChan = parseInt(el('halow_ap_chan_num').value, 10);
+        updateChannelsForBw(curBw, curOp, curChan);
+      }
+    }
+  } catch (e) {
+    /* default table used */
+  }
+}
+
+async function loadConfig() {
+  try {
+    var res = await fetch('/api/config', { cache: 'no-store' });
+    if (res.status === 401) { handleAuthExpiry(); return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var cfg = await res.json();
+    el('node_id').value = cfg.node_id || '';
+    setRole(cfg.role || 'client');
+    el('allow_uplink_management').checked = !!cfg.allow_uplink_management;
+
+    el('uplink_ssid').value = (cfg.uplink && cfg.uplink.ssid) || '';
+    el('uplink_security').value = (cfg.uplink && cfg.uplink.security) || 'open';
+    var staticChecked = !!(cfg.uplink && cfg.uplink.use_static_ip);
+    el('uplink_use_static_ip').checked = staticChecked;
+    el('staticIpFields').style.display = staticChecked ? 'block' : 'none';
+    el('uplink_static_ip').value = (cfg.uplink && cfg.uplink.static_ip) || '';
+    el('uplink_static_gateway').value = (cfg.uplink && cfg.uplink.static_gateway) || '';
+    el('uplink_static_netmask').value = (cfg.uplink && cfg.uplink.static_netmask) || '';
+    el('uplink_static_dns').value = (cfg.uplink && cfg.uplink.static_dns) || '';
+
+    el('softap_ssid').value = (cfg.softap && cfg.softap.ssid) || '';
+    el('softap_channel').value = (cfg.softap && cfg.softap.channel) || 6;
+
+    el('wifi_uplink_ssid').value = (cfg.wifi_uplink && cfg.wifi_uplink.ssid) || '';
+
+    el('halow_ap_ssid').value = (cfg.halow_ap && cfg.halow_ap.ssid) || '';
+    el('halow_ap_security').value = (cfg.halow_ap && cfg.halow_ap.security) || 'sae';
+    if (cfg.halow_ap && cfg.halow_ap.op_class && cfg.halow_ap.s1g_chan_num) {
+      syncSelectedChannel(cfg.halow_ap.op_class, cfg.halow_ap.s1g_chan_num);
+    } else {
+      syncSelectedChannel(4, 1);
+    }
+    el('halow_ap_max_stas').value = (cfg.halow_ap && cfg.halow_ap.max_stas) || '';
+    el('halow_ap_ip').value = (cfg.halow_ap && cfg.halow_ap.ip) || '';
+    el('halow_ap_netmask').value = (cfg.halow_ap && cfg.halow_ap.netmask) || '';
+
+    el('cot_group').value = (cfg.cot && cfg.cot.group) || '239.2.3.1';
+    el('cot_port').value = (cfg.cot && cfg.cot.port) || 6969;
+  } catch (e) {
+    showStatus('Failed to load config: ' + e.message, false);
+  }
+}
+
+async function saveConfig() {
+  var btn = el('saveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  var body = {
+    node_id: el('node_id').value,
+    role: el('node_role').value,
+    allow_uplink_management: el('allow_uplink_management').checked,
+    uplink: {
+      ssid: el('uplink_ssid').value,
+      security: el('uplink_security').value,
+      psk: el('uplink_psk').value,
+      use_static_ip: el('uplink_use_static_ip').checked,
+      static_ip: el('uplink_static_ip').value,
+      static_gateway: el('uplink_static_gateway').value,
+      static_netmask: el('uplink_static_netmask').value,
+      static_dns: el('uplink_static_dns').value
+    },
+    softap: {
+      ssid: el('softap_ssid').value,
+      psk: el('softap_psk').value,
+      channel: parseInt(el('softap_channel').value, 10) || 6
+    },
+    wifi_uplink: {
+      ssid: el('wifi_uplink_ssid').value,
+      psk: el('wifi_uplink_psk').value
+    },
+    halow_ap: {
+      ssid: el('halow_ap_ssid').value,
+      security: el('halow_ap_security').value,
+      psk: el('halow_ap_psk').value,
+      op_class: parseInt(el('halow_ap_op_class').value, 10) || 4,
+      s1g_chan_num: parseInt(el('halow_ap_chan_num').value, 10) || 1,
+      max_stas: parseInt(el('halow_ap_max_stas').value, 10) || 0,
+      ip: el('halow_ap_ip').value,
+      netmask: el('halow_ap_netmask').value
+    },
+    cot: {
+      group: el('cot_group').value,
+      port: parseInt(el('cot_port').value, 10) || 6969
+    }
+  };
+  try {
+    var res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (res.status === 401) {
+      handleAuthExpiry();
+    } else if (res.ok) {
+      showStatus('Configuration saved. Reboot node to apply.', true);
+      el('uplink_psk').value = '';
+      el('softap_psk').value = '';
+      el('wifi_uplink_psk').value = '';
+      el('halow_ap_psk').value = '';
+    } else {
+      var text = await res.text().catch(function () { return ''; });
+      showStatus(text ? text.replace(/<[^>]*>/g, '').trim() : 'Save failed (' + res.status + ')', false);
+    }
+  } catch (e) {
+    showStatus('Save failed: ' + e.message, false);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Config';
+  }
+}
+
+el('saveBtn').addEventListener('click', saveConfig);
+el('cfgForm').addEventListener('submit', function(ev) { ev.preventDefault(); saveConfig(); });
+
+el('rebootBtn').addEventListener('click', async function () {
+  if (!confirm('Reboot the gateway now? Local Wi-Fi will drop for ~5 seconds.')) return;
+  showStatus('Rebooting node…', true);
+  clearInterval(statusTimer);
+  try {
+    var res = await fetch('/api/reboot', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    if (res.status === 401) { handleAuthExpiry(); return; }
+  } catch (e) {
+    /* expected disconnect */
+  }
+  setTimeout(function () {
+    statusTimer = setInterval(loadStatus, 2000);
+  }, 3500);
+});
+
+// HaLow Scanner
+el('scanBtn').addEventListener('click', async function () {
+  var btn = el('scanBtn');
+  var out = el('scanResults');
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  out.innerHTML = '';
+  scanning = true;
+  try {
+    var res = await fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    if (res.status === 401) { handleAuthExpiry(); return; }
+    if (!res.ok) {
+      var text = await res.text().catch(function () { return ''; });
+      throw new Error(text ? text.replace(/<[^>]*>/g, '').trim() : 'HTTP ' + res.status);
+    }
+
+    // The scan itself takes several seconds; the POST above only submits it
+    // (main/uplink_halow.h's uplink_halow_scan_start()/_poll() comment - the
+    // firmware doesn't hold this request open for the scan's duration any
+    // more), so poll GET /api/scan for the result instead of expecting it in
+    // the POST response. 30 x 500ms = 15s is comfortably past the firmware's
+    // own WEB_UI_SCAN_TIMEOUT_MS (8s, main/web_ui.c) deadline, which is what
+    // actually bounds how long a scan can stay "running" server-side - this
+    // is just a client-side backstop in case a poll response never arrives.
+    var data = null;
+    for (var attempt = 0; attempt < 30; attempt++) {
+      await new Promise(function (resolve) { setTimeout(resolve, 500); });
+      var poll = await fetch('/api/scan', { cache: 'no-store' });
+      if (poll.status === 401) { handleAuthExpiry(); return; }
+      if (!poll.ok) throw new Error('HTTP ' + poll.status);
+      data = await poll.json();
+      if (!data.running) break;
+    }
+    if (!data || data.running) {
+      throw new Error('scan is taking longer than expected - try again');
+    }
+    var aps = data.aps || [];
+    if (!aps.length) {
+      out.innerHTML = '<p class="hint" style="color:var(--color-warn);">No HaLow APs found in region ' +
+        (data.country || 'US') + '. Ensure the mesh Pi HaLow AP is configured for US (902–928 MHz).</p>';
+      return;
+    }
+    aps.sort(function (a, b) { return (b.rssi || -999) - (a.rssi || -999); });
+
+    var table = document.createElement('table');
+    table.className = 'scan-table';
+    var thead = document.createElement('thead');
+    var hrow = document.createElement('tr');
+    ['SSID', 'BSSID', 'RSSI', 'Freq', 'BW'].forEach(function (h) {
+      var th = document.createElement('th');
+      th.textContent = h;
+      hrow.appendChild(th);
+    });
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    aps.forEach(function (ap) {
+      var tr = document.createElement('tr');
+      tr.title = 'Click to use this SSID';
+      var cells = [
+        [ap.ssid || '(hidden)', ''],
+        [ap.bssid || '', 'num'],
+        [(ap.rssi != null ? ap.rssi + ' dBm' : '—'), 'num'],
+        [(ap.freq_khz != null ? (ap.freq_khz / 1000).toFixed(1) + ' MHz' : '—'), 'num'],
+        [(ap.bw_mhz != null ? ap.bw_mhz + ' MHz' : '—'), 'num']
+      ];
+      cells.forEach(function (c) {
+        var td = document.createElement('td');
+        td.textContent = c[0];
+        if (c[1]) td.className = c[1];
+        tr.appendChild(td);
+      });
+      tr.addEventListener('click', function () {
+        if (!ap.ssid) return;
+        el('uplink_ssid').value = ap.ssid;
+        showStatus('SSID set to "' + ap.ssid + '" — select security and save.', true);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    out.appendChild(table);
+  } catch (e) {
+    showStatus('Scan error: ' + e.message, false);
+  } finally {
+    scanning = false;
+    btn.disabled = false;
+    btn.textContent = 'Scan for HaLow APs';
+  }
+});
+
+// Log Viewer
+async function loadLog() {
+  try {
+    var res = await fetch('/api/log', { cache: 'no-store' });
+    if (res.status === 401) { handleAuthExpiry(); return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var view = el('logView');
+    var atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+    view.textContent = await res.text();
+    if (atBottom) view.scrollTop = view.scrollHeight;
+  } catch (e) {
+    showStatus('Could not load log: ' + e.message, false);
+  }
+}
+
+el('logBtn').addEventListener('click', loadLog);
+
+// Task stack headroom. Thresholds match cmd_gwcfg_tasks() in provisioning.c -
+// if you change one, change the other, or the console and the web UI will
+// disagree about whether a node is in trouble.
+el('tasksBtn').addEventListener('click', async function () {
+  var out = el('tasksOut');
+  var btn = el('tasksBtn');
+  btn.disabled = true;
+  out.textContent = 'Reading task stacks...';
+  try {
+    var res = await fetch('/api/tasks', { cache: 'no-store' });
+    if (res.status === 401) { handleAuthExpiry(); return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var tasks = (await res.json()).tasks || [];
+    out.textContent = '';
+
+    var table = document.createElement('table');
+    table.className = 'scan-table';
+    var thead = document.createElement('thead');
+    var hrow = document.createElement('tr');
+    ['Task', 'Stack', 'Free', 'Used'].forEach(function (h) {
+      var th = document.createElement('th');
+      th.textContent = h;
+      hrow.appendChild(th);
+    });
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    var worst = null;
+    tasks.forEach(function (t) {
+      var tr = document.createElement('tr');
+      var cells;
+      if (!t.present) {
+        tr.style.opacity = '0.5';
+        cells = [[t.name, ''], [t.stack + ' B', 'num'], ['—', 'num'], ['not running', 'num']];
+      } else {
+        // Round up, so a task that has touched any stack at all never shows 0%.
+        var pct = t.stack ? Math.ceil((t.stack - t.free) * 100 / t.stack) : 0;
+        if (worst === null || t.free < worst.free) worst = t;
+        // Theme variables, not literals: the page has light and dark palettes
+        // and a hardcoded colour is unreadable in one of them.
+        if (t.free < 256) tr.style.color = 'var(--color-warn)';
+        else if (t.free < 512) tr.style.color = 'var(--color-accent)';
+        cells = [[t.name, ''], [t.stack + ' B', 'num'], [t.free + ' B', 'num'], [pct + '%', 'num']];
+      }
+      cells.forEach(function (c) {
+        var td = document.createElement('td');
+        td.textContent = c[0];
+        if (c[1]) td.className = c[1];
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    out.appendChild(table);
+
+    if (worst && worst.free < 256) {
+      showStatus('"' + worst.name + '" has only ' + worst.free + ' bytes of stack left — it will overflow.', false);
+    } else if (worst && worst.free < 512) {
+      showStatus('"' + worst.name + '" is down to ' + worst.free + ' bytes of stack.', false);
+    } else if (worst) {
+      showStatus('Stacks OK — tightest is "' + worst.name + '" with ' + worst.free + ' bytes free.', true);
+    }
+  } catch (e) {
+    out.textContent = '';
+    showStatus('Could not read task stacks: ' + e.message, false);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el('logAutoBtn').addEventListener('click', function () {
+  if (logTimer) {
+    clearInterval(logTimer);
+    logTimer = null;
+    el('logAutoBtn').textContent = 'Auto-refresh: off';
+  } else {
+    loadLog();
+    logTimer = setInterval(loadLog, 3000);
+    el('logAutoBtn').textContent = 'Auto-refresh: on';
+  }
+});
+
+el('copyLogBtn').addEventListener('click', function() {
+  var logText = el('logView').textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(logText).then(function() {
+      showStatus('Log copied to clipboard', true);
+    });
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = logText;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    showStatus('Log copied to clipboard', true);
+  }
+});
+
+/* showApp() (called from initAuth() below once a session is confirmed)
+ * itself does what used to run unconditionally here: initChannelList(),
+ * loadConfig(), loadStatus() plus its 5s poll, loadRssiHistory() plus its
+ * 30s poll (matches LINK_HISTORY_INTERVAL_S, main/link_history.h - polling
+ * faster than new samples arrive would just redraw the identical chart).
+ * Nothing in appShell should run before a session exists. */
+
+el('authLoginBtn').addEventListener('click', async function () {
+  var btn = this;
+  var password = el('authLoginPassword').value;
+  if (!password) {
+    el('authLoginHint').textContent = 'Enter your password.';
+    return;
+  }
+  btn.disabled = true;
+  el('authLoginHint').textContent = 'Signing in…';
+  try {
+    var chRes = await fetch('/api/auth/challenge', { cache: 'no-store' });
+    var ch = await chRes.json();
+    if (!chRes.ok) {
+      el('authLoginHint').textContent = ch.error === 'locked_out'
+        ? ('Too many attempts - try again in ' + ch.retry_after_s + 's.')
+        : 'Could not start login - reload and try again.';
+      return;
+    }
+    /* PBKDF2 runs here, client-side, at the salt/iterations the server just
+     * issued - see design/ROADMAP.md item 1 for why the device never derives
+     * this itself. */
+    var storedKey = gwCrypto.pbkdf2Sha256Hex(password, ch.salt, ch.iterations, 32);
+    var response = gwCrypto.hmacSha256Hex(storedKey, ch.nonce);
+    var loginRes = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nonce: ch.nonce, response: response })
+    });
+    var loginBody = await loginRes.json().catch(function () { return {}; });
+    if (loginRes.ok) {
+      el('authLoginPassword').value = '';
+      showApp();
+    } else if (loginBody.error === 'locked_out') {
+      el('authLoginHint').textContent = 'Too many attempts - try again in ' + loginBody.retry_after_s + 's.';
+    } else {
+      el('authLoginHint').textContent = 'Incorrect password.';
+    }
+  } catch (e) {
+    el('authLoginHint').textContent = 'Login failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el('authLoginPassword').addEventListener('keydown', function (ev) {
+  if (ev.key === 'Enter') { el('authLoginBtn').click(); }
+});
+
+el('authSetPasswordBtn').addEventListener('click', async function () {
+  var btn = this;
+  var pw1 = el('authNewPassword').value;
+  var pw2 = el('authNewPasswordConfirm').value;
+  if (pw1.length < 8) {
+    el('authSetPasswordHint').textContent = 'Password must be at least 8 characters.';
+    return;
+  }
+  if (pw1 !== pw2) {
+    el('authSetPasswordHint').textContent = 'Passwords do not match.';
+    return;
+  }
+  btn.disabled = true;
+  el('authSetPasswordHint').textContent = 'Setting password…';
+  try {
+    var saltRes = await fetch('/api/auth/new-salt', { cache: 'no-store' });
+    if (saltRes.status === 401) { handleAuthExpiry(); return; }
+    var saltBody = await saltRes.json();
+    if (!saltRes.ok) {
+      el('authSetPasswordHint').textContent = 'Could not start password set - reload and try again.';
+      return;
+    }
+    var storedKey = gwCrypto.pbkdf2Sha256Hex(pw1, saltBody.salt, saltBody.iterations, 32);
+    var setRes = await fetch('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stored_key: storedKey, setup_secret: el('authSetupSecret').value.trim() })
+    });
+    /* Not handleAuthExpiry() on a 401 here - first-use has no session to
+     * expire, and a 401 on this specific request means the setup code was
+     * wrong or missing (bad_setup_secret), which belongs inline on this
+     * same screen, not a redirect to the login form. */
+    if (setRes.ok) {
+      el('authSetupSecret').value = '';
+      el('authNewPassword').value = '';
+      el('authNewPasswordConfirm').value = '';
+      showApp();
+    } else {
+      var errBody = await setRes.json().catch(function () { return {}; });
+      el('authSetPasswordHint').textContent = errBody.error === 'no_pending_salt' ? 'Timed out - try again.'
+        : errBody.error === 'bad_setup_secret' ? 'Setup code is missing or incorrect - check the serial console.'
+        : 'Could not set password.';
+    }
+  } catch (e) {
+    el('authSetPasswordHint').textContent = 'Failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function initAuth() {
+  try {
+    var res = await fetch('/api/auth/status', { cache: 'no-store' });
+    var s = await res.json();
+    if (s.authenticated) {
+      showApp();
+      return;
+    }
+    showAuthScreen(s.password_set ? 'login' : 'set-password',
+      (!s.password_set && !s.onboarding_open)
+        ? 'The setup window has closed. Reopen it from the serial console with gwcfg-reopen-onboarding.'
+        : null);
+  } catch (e) {
+    showAuthScreen('login', 'Could not reach the node - check your connection and reload.');
+  }
+}
+
+initAuth();
+</script>
+
+</body>
+</html>

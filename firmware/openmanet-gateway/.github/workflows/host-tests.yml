@@ -1,0 +1,42 @@
+name: Host-side regression tests
+
+# Review finding F16 (design/PROJECT_REVIEW_2026-09-10.md): "no maintained
+# automated firmware regression suite was found." Deliberately a separate,
+# fast workflow from build-firmware.yml rather than an extra job there - this
+# needs nothing but a system compiler and Python (no ESP-IDF Docker image, no
+# ~10 minute build), so it should report pass/fail independently and quickly
+# rather than being bundled behind the slow build's own status.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # -Werror here, not just -Wall -Wextra: this project's own ESP-IDF
+      # build already holds a zero-warnings bar (CLAUDE.md), and
+      # main/net_validate.c is compiled both ways (ESP_PLATFORM defined for
+      # the real firmware, undefined here) - a warning that only shows up in
+      # one of the two builds is exactly the kind of thing worth catching
+      # here rather than only on the next full firmware build.
+      - name: Build and run main/net_validate.c host tests
+        run: |
+          set -eu
+          gcc -Wall -Wextra -Werror -std=c11 -I main \
+              main/net_validate.c main/host_tests/test_net_validate.c \
+              -o /tmp/test_net_validate
+          /tmp/test_net_validate
+
+      - name: Run patch_vendored_halow.py regression tests
+        run: python3 main/host_tests/test_patch_vendored_halow.py -v

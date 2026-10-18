@@ -1,0 +1,753 @@
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdlib.h>
+
+#include "driver/gpio.h"
+#include "esp_app_desc.h"
+#include "esp_core_dump.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+#include "auth.h"
+#include "chip_temp.h"
+#include "cot_relay.h"
+#include "dns_forward.h"
+#include "downlink_halow_ap.h"
+#include "downlink_softap.h"
+#include "factory_reset.h"
+#include "gw_config.h"
+#include "heap_guard.h"
+#include "ip_forward_nat.h"
+#include "link_history.h"
+#include "log_buffer.h"
+#include "provisioning.h"
+#include "radio_control.h"
+#include "status_led.h"
+#include "task_stats.h"
+#include "tls_identity.h"
+#include "uplink_halow.h"
+#include "uplink_wifi.h"
+#include "web_ui.h"
+
+static const char *TAG = "app_main";
+
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    /* Names, not numbers: this line is read by whoever is holding the board,
+     * often through the web UI's log panel rather than a terminal. Values from
+     * esp_reset_reason_t (esp_system/include/esp_system.h, v5.5.1 L24-41). */
+    switch (reason) {
+    case ESP_RST_POWERON:     return "power-on";
+    case ESP_RST_EXT:         return "external pin";
+    case ESP_RST_SW:          return "software (esp_restart)";
+    case ESP_RST_PANIC:       return "PANIC (exception)";
+    case ESP_RST_INT_WDT:     return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:    return "task watchdog";
+    case ESP_RST_WDT:         return "other watchdog";
+    case ESP_RST_DEEPSLEEP:   return "deep sleep wake";
+    case ESP_RST_BROWNOUT:    return "BROWNOUT (supply sagged)";
+    case ESP_RST_SDIO:        return "SDIO";
+    case ESP_RST_USB:         return "USB peripheral";
+    case ESP_RST_JTAG:        return "JTAG";
+    case ESP_RST_EFUSE:       return "efuse error";
+    case ESP_RST_PWR_GLITCH:  return "power glitch";
+    case ESP_RST_CPU_LOCKUP:  return "CPU lockup (double exception)";
+    case ESP_RST_UNKNOWN:
+    default:                  return "unknown";
+    }
+}
+
+/* Says why the last boot ended, in the first lines of the log ring.
+ *
+ * This exists because the two failure modes seen on real hardware are
+ * indistinguishable from outside: a brownout and a firmware panic both restart
+ * the node, both wipe the RAM-held log ring, and both leave the LED cycling
+ * through its power-on patterns. Worse, the device this runs on may be
+ * powered from a wall adapter with no serial cable attached - which is exactly
+ * when a reboot loop is hardest to diagnose - so the answer has to reach the
+ * web UI's log panel, not just a terminal.
+ *
+ * esp_reset_reason() is authoritative for *this* boot. The core dump is not:
+ * it is simply the most recent panic ever recorded in flash, so it can predate
+ * this boot by any amount. A brownout leaves no core dump at all, and would
+ * otherwise be reported under whatever stale panic was still sitting in the
+ * partition. The two are logged separately, and labelled, for that reason. */
+static void log_boot_diagnostics(void)
+{
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (reason == ESP_RST_POWERON) {
+        ESP_LOGI(TAG, "reset reason: %s", reset_reason_name(reason));
+    } else {
+        /* Anything other than a clean power-on is worth a warning: on a node
+         * that is meant to stay up, it means the last boot ended badly. */
+        ESP_LOGW(TAG, "reset reason: %s", reset_reason_name(reason));
+    }
+
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+    /* Heap-allocated on espressif's own advice - the summary carries a full
+     * register set and backtrace and has no business on this stack
+     * (esp_core_dump.h L162-169 shows exactly this pattern). */
+    esp_core_dump_summary_t *summary = malloc(sizeof(*summary));
+    if (summary == NULL) {
+        return;
+    }
+    if (esp_core_dump_get_summary(summary) == ESP_OK) {
+        ESP_LOGW(TAG, "a core dump is stored in flash - most recent panic was in task '%s' "
+                      "at PC 0x%08" PRIx32 " (may predate this boot)",
+                 summary->exc_task, summary->exc_pc);
+        for (uint32_t i = 0; i < summary->exc_bt_info.depth && i < 16; i++) {
+            ESP_LOGW(TAG, "  backtrace[%u]: 0x%08" PRIx32, (unsigned)i, summary->exc_bt_info.bt[i]);
+        }
+        if (summary->exc_bt_info.corrupted) {
+            ESP_LOGW(TAG, "  (backtrace is marked corrupted - treat it as a hint, not proof)");
+        }
+        ESP_LOGW(TAG, "  run `idf.py coredump-info` for a symbolized version");
+    }
+    free(summary);
+#endif
+}
+
+/* Lives for the life of the device, not app_main()'s stack - the uplink
+ * state callback fires from a different task after app_main() has
+ * returned. */
+static gw_config_t s_cfg;
+static bool s_datapath_up = false;
+static TaskHandle_t s_datapath_task = NULL;
+
+/* What on_uplink_state() pokes to wake datapath_task().
+ *
+ * A binary semaphore rather than the task notification this used to use, and
+ * that choice is what lets datapath_task() exit when its work is done (see the
+ * end of that function). A notification has to be addressed to a task handle,
+ * so the event-loop task would have to read s_datapath_task and then call
+ * xTaskNotifyGive() on it - and there is no way to make "read the handle" and
+ * "notify through it" atomic against the task freeing its own TCB in between.
+ * The window is small and the crash would be rare, unattended, and blamed on
+ * something else.
+ *
+ * A semaphore has no such window: it is created before the task and never
+ * deleted, so a give that lands after the task is gone is simply a give
+ * nobody takes. Giving a binary semaphore that is already available returns
+ * pdFALSE and does nothing else, so the repeat costs nothing either. */
+static SemaphoreHandle_t s_datapath_wake = NULL;
+
+/* Brings up NAT + the CoT relay the first time the uplink (whichever kind -
+ * HaLow STA for GW_ROLE_CLIENT, native Wi-Fi STA for GW_ROLE_RELAY) gets an
+ * IP. Shared by both roles - datapath_task() below picks the netif pair - so
+ * the NAT-direction and error-handling logic exists exactly once.
+ *
+ * Runs on the datapath task, never on the event loop task; see datapath_task()
+ * for why that distinction is load-bearing rather than stylistic.
+ *
+ * Known v1 limitation: if a later reconnect gets a *different* IP, NAT/CoT
+ * relay aren't re-initialized against it - see design/ROADMAP.md for the
+ * NAT-vs-route tradeoff this is part of.
+ *
+ * The "did this already" flag is set only once both pieces actually succeeded.
+ * Setting it on entry (as this used to) meant a single transient failure - the
+ * downlink netif momentarily without an address, say - permanently disabled
+ * the datapath until someone power-cycled the node, because no later
+ * reconnect would ever try again. */
+
+/* Bounds how long bring_up_datapath() will wait for the downlink netif to
+ * come up before giving up on this attempt - see wait_for_downlink_up()'s
+ * doc comment for what this is guarding against. */
+#define DOWNLINK_UP_POLL_MS    100
+#define DOWNLINK_UP_TIMEOUT_MS 5000
+
+/* Blocks until downlink_netif is up at the lwIP level, or DOWNLINK_UP_TIMEOUT_MS
+ * elapses.
+ *
+ * In GW_ROLE_CLIENT the downlink is the SoftAP, which esp_wifi marks up
+ * essentially at start - this returns true on its first check there, always.
+ *
+ * In GW_ROLE_RELAY the downlink is the HaLow AP netif. mmhalow_init() creates
+ * it as ESP_NETIF_DEFAULT_WIFI_STA() (downlink_halow_ap.c's own comment on why)
+ * and only marks it up via esp_netif_action_connected(), which the driver's
+ * link-state callback fires asynchronously once the radio itself reports link
+ * up (morsemicro/halow 2.11.2-esp32-2's mmhalow.c: mmhalow_link_state(),
+ * L18-27). Nothing gates bring_up_datapath() on that - it only runs off the
+ * *uplink*'s state callback (on_uplink_state(), registered via
+ * uplink_wifi_set_state_callback()/uplink_halow_set_state_callback() below) -
+ * so a fast uplink can call in before the downlink has caught up.
+ *
+ * Observed on real hardware: the native Wi-Fi uplink got its DHCP lease
+ * ~50ms after esp_wifi came up, almost certainly before the HaLow AP netif
+ * was marked up. esp_netif_napt_enable() failed as a result - it "fails only
+ * if netif is down" (esp-idf esp_netif_lwip.c L2695/L2701-2706 at v5.5.1,
+ * confirmed against that source) - and cot_relay_start()'s IP_ADD_MEMBERSHIP
+ * failed right behind it for the same underlying reason.
+ *
+ * Bounded so a downlink that never comes up (radio init failure, no SSID
+ * configured) doesn't wedge this task forever - datapath_task()'s own retry
+ * timer (DATAPATH_RETRY_INTERVAL_MS) picks this attempt back up on its own if
+ * this times out, it doesn't depend on another uplink reconnect. */
+static bool wait_for_downlink_up(esp_netif_t *downlink_netif)
+{
+    for (int waited_ms = 0; waited_ms < DOWNLINK_UP_TIMEOUT_MS; waited_ms += DOWNLINK_UP_POLL_MS) {
+        if (esp_netif_is_netif_up(downlink_netif)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(DOWNLINK_UP_POLL_MS));
+    }
+    return esp_netif_is_netif_up(downlink_netif);
+}
+
+static void bring_up_datapath(esp_netif_t *downlink_netif, esp_netif_t *uplink_netif,
+                               const gw_cot_config_t *cot, bool is_relay)
+{
+    if (s_datapath_up) {
+        return;
+    }
+
+    /* Only worth waiting on a netif that exists - a NULL downlink means its
+     * role bring-up already failed to init the radio (e.g.
+     * bring_up_relay_role()'s "HaLow AP bring-up failed" path), and
+     * ip_forward_nat_init()/cot_relay_start() below already log that case
+     * clearly and immediately. No reason to sit through
+     * DOWNLINK_UP_TIMEOUT_MS first just to reach the same outcome. */
+    if (downlink_netif != NULL && !wait_for_downlink_up(downlink_netif)) {
+        ESP_LOGW(TAG, "downlink netif not up after %dms - datapath is incomplete, will retry",
+                 DOWNLINK_UP_TIMEOUT_MS);
+        return;
+    }
+
+    /* NAPT goes on the downlink side, default route on the uplink, and the
+     * uplink's DNS server is copied into the downlink's DHCP offers - see
+     * ip_forward_nat.h for why that direction is not the intuitive one. For
+     * GW_ROLE_RELAY the "downlink" is the HaLow AP rather than the SoftAP,
+     * but the same reasoning applies - it's still the side leaf clients sit
+     * behind. */
+    esp_err_t nat_err = ip_forward_nat_init(downlink_netif, uplink_netif);
+    if (nat_err != ESP_OK) {
+        ESP_LOGE(TAG, "NAT init failed: %s", esp_err_to_name(nat_err));
+    }
+
+    esp_err_t cot_err = cot_relay_start(uplink_netif, downlink_netif, cot);
+    if (cot_err == ESP_ERR_INVALID_STATE) {
+        cot_err = ESP_OK; /* already running from an earlier attempt */
+    } else if (cot_err != ESP_OK) {
+        ESP_LOGE(TAG, "CoT relay start failed: %s", esp_err_to_name(cot_err));
+    }
+
+    /* GW_ROLE_RELAY only - a leaf's statically-addressed uplink has no DHCP
+     * lease to learn a DNS server from at all (see gw_uplink_config_t.
+     * static_dns's own comment), so this node's own real one (from its own,
+     * normally-DHCP'd uplink) needs to be reachable for leaves to point at.
+     * Not fatal if it fails - same severity as a missing DNS server
+     * anywhere else in this project - NAT/CoT still work without it. */
+    if (is_relay) {
+        esp_err_t dns_err = dns_forward_start(downlink_netif, uplink_netif);
+        if (dns_err == ESP_ERR_INVALID_STATE) {
+            dns_err = ESP_OK; /* already running from an earlier attempt */
+        } else if (dns_err != ESP_OK) {
+            ESP_LOGW(TAG, "DNS forwarder start failed: %s", esp_err_to_name(dns_err));
+        }
+    }
+
+    if (nat_err == ESP_OK && cot_err == ESP_OK) {
+        s_datapath_up = true;
+    } else {
+        ESP_LOGW(TAG, "datapath is incomplete - will retry");
+    }
+}
+
+/* Why bring_up_datapath() runs on a task of its own instead of directly in the
+ * uplink state callback.
+ *
+ * Both uplink modules raise that callback from inside an esp_event handler, so
+ * it runs on the default event loop's task - "sys_evt". That task gets
+ * ESP_TASKD_EVENT_STACK bytes of stack, which at v5.5.1 is
+ * CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE (2304, the Kconfig default this
+ * project doesn't override) + TASK_EXTRA_STACK_SIZE (512, because
+ * CONFIG_NEWLIB_NANO_FORMAT is off) = 2816 bytes total, for everything the
+ * handler chain does. Sources: esp_event/default_event_loop.c L98-104 names the
+ * task and picks the stack macro, esp_system/include/esp_task.h L48-53 defines
+ * it, esp_system/Kconfig L219-221 gives the 2304 default.
+ *
+ * bring_up_datapath() does not fit in what's left of that below the event
+ * loop's own frames. It makes a run of esp_netif calls, then opens, binds and
+ * configures the CoT relay's socket and spawns a task - and logs as it goes,
+ * where each ESP_LOGx costs several hundred bytes of stack through the full
+ * (non-nano) newlib vfprintf. On real hardware in GW_ROLE_RELAY that overflowed
+ * and panicked the node into a reboot loop the instant the Wi-Fi uplink got its
+ * DHCP lease:
+ *
+ *     I (5325) uplink_wifi: Wi-Fi uplink up (has IP)
+ *     E (5325) ip_
+ *     ***ERROR*** A stack overflow in task sys_evt has been detected.
+ *
+ * The truncated tag is the tell: the overflow was caught while ip_forward_nat.c
+ * was still formatting that line, so the log ends mid-word.
+ *
+ * The rule this broke is that esp_event handlers must stay short - the same
+ * reason uplink_wifi.c drives esp_wifi_connect() from its own "wifi_reconnect"
+ * task rather than calling it from the WIFI_EVENT handler. So the callback now
+ * does nothing but give a semaphore, and the work happens here on a stack
+ * sized for it.
+ *
+ * Doing it this way also means a callback can no longer block the event loop:
+ * bring_up_datapath() waits on esp_netif's lwIP IPC for every call it makes,
+ * and stalling sys_evt stalls delivery of every other event in the system. */
+/* How often datapath_task() retries bring_up_datapath() on its own, without
+ * waiting for another uplink reconnect - review finding F08
+ * (design/PROJECT_REVIEW_2026-09-10.md): "a downlink becoming ready after
+ * the wait expires may never retry" was a real, not theoretical, gap. Before
+ * this, a failed attempt only retried on the *next* on_uplink_state(true)
+ * call - so if the uplink came up first and stayed up (the common case: an
+ * already-associated uplink reconnecting isn't what unblocks a slow
+ * downlink), and the downlink then took longer than
+ * wait_for_downlink_up()'s DOWNLINK_UP_TIMEOUT_MS to come up, nothing would
+ * ever wake this task again and the node would sit with a radio up but no
+ * NAT/CoT relay configured until a manual reboot. Not a hypothetical race:
+ * this session's own hardware testing measured the HaLow AP downlink netif
+ * taking anywhere from ~2.5s to several seconds past boot to report up,
+ * depending on run - comfortably within range of colliding with an uplink
+ * that's already connected well before it.
+ *
+ * 3s is short enough that a node stuck on a genuinely slow downlink recovers
+ * within a few attempts, and long enough that a hung retry loop isn't
+ * hammering esp_netif_napt_enable()/cot_relay_start() every tick - both are
+ * cheap, idempotent state-setting calls (ip_forward_nat_init()'s own
+ * comment; cot_relay_start()/dns_forward_start() already treat "already
+ * running" as success), so retrying them costs little, but there's no
+ * reason to retry faster than the downlink itself is likely to change
+ * state. */
+#define DATAPATH_RETRY_INTERVAL_MS 3000
+
+static void datapath_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        /* Once up, park forever - the exact case the comment below explains.
+         * Until then, retry on our own timer as well as on a wake-up, so a
+         * downlink that comes up late is not depending on another uplink
+         * reconnect that may never happen. */
+        TickType_t wait = s_datapath_up ? portMAX_DELAY : pdMS_TO_TICKS(DATAPATH_RETRY_INTERVAL_MS);
+        xSemaphoreTake(s_datapath_wake, wait);
+
+        /* Snapshot under the lock for the same reason the role bring-up
+         * functions do it: the console and web UI are live by now and can be
+         * editing this struct concurrently. */
+        provisioning_config_lock();
+        gw_node_role_t role = s_cfg.role;
+        gw_cot_config_t cot = s_cfg.cot;
+        provisioning_config_unlock();
+
+        if (role == GW_ROLE_RELAY) {
+            /* Native Wi-Fi STA uplink (to the Pi's local AP), HaLow AP
+             * downlink (to leaf XIAOs). */
+            bring_up_datapath(downlink_halow_ap_get_netif(), uplink_wifi_get_netif(), &cot, true);
+        } else {
+            /* HaLow STA uplink, local SoftAP downlink. */
+            bring_up_datapath(downlink_softap_get_netif(), uplink_halow_get_netif(), &cot, false);
+        }
+
+        /* Done means done: give the 4 KB back rather than parking it.
+         *
+         * Once s_datapath_up is set, every future pass through this loop is
+         * bring_up_datapath() returning at its first line - NAT and the CoT
+         * relay are both up and are deliberately not re-initialized against a
+         * later uplink IP (that limitation is recorded in design/ROADMAP.md
+         * under "Known limitations", and is a decision, not an oversight). So
+         * the task would otherwise sit on portMAX_DELAY for the life of the
+         * device holding a stack sized for the heaviest thing it ever does.
+         *
+         * 4 KB is worth reclaiming on a part that also runs two Wi-Fi stacks,
+         * lwIP with NAT, and an HTTP server. If either half failed, s_datapath_up
+         * is still false and this task stays alive, retrying on its own timer
+         * (DATAPATH_RETRY_INTERVAL_MS above) as well as on the next reconnect -
+         * see that constant's comment for why relying on reconnects alone
+         * (this loop's original design) was itself review finding F08.
+         *
+         * The handle is cleared first so nothing is left holding a pointer to
+         * a TCB the idle task is about to free - on_uplink_state() no longer
+         * reads it at all (that is what s_datapath_wake is for), and
+         * datapath_task_start() is called exactly once per boot, from the role
+         * bring-up path before this task can have finished. `gwcfg-tasks` and
+         * /api/tasks will report "datapath" as absent from here on, which
+         * task_stats.c already treats as information rather than an error. */
+        if (s_datapath_up) {
+            ESP_LOGI(TAG, "datapath is up - the bring-up task has finished and is exiting, "
+                          "returning its %u-byte stack", (unsigned)GW_STACK_DATAPATH);
+            s_datapath_task = NULL;
+            vTaskDelete(NULL);
+        }
+    }
+}
+
+/* Runs on the event loop task for both roles - keep it to a wake-up and
+ * nothing else. See datapath_task() above for what happens otherwise.
+ *
+ * A give on a task that is mid-bring-up leaves the semaphore available, so a
+ * reconnect that races an in-flight attempt re-runs it rather than being
+ * dropped; bring_up_datapath()'s own s_datapath_up guard makes the repeat a
+ * no-op once the datapath is actually up, and after that the task has exited
+ * and the give goes nowhere at all. */
+static void on_uplink_state(bool connected, void *ctx)
+{
+    (void)ctx;
+    if (!connected || s_datapath_wake == NULL) {
+        return;
+    }
+    xSemaphoreGive(s_datapath_wake);
+}
+
+/* Started only on the paths that actually register the callback, so a node
+ * with no uplink configured (or whose radio failed to init) doesn't hold 4 KB
+ * of stack for a task that can never be woken. */
+static esp_err_t datapath_task_start(void)
+{
+    if (s_datapath_task != NULL) {
+        return ESP_OK;
+    }
+    /* Before the task, not after: the task's first act is to wait on this,
+     * and on_uplink_state() drops a wake-up on the floor if it doesn't exist
+     * yet. */
+    if (s_datapath_wake == NULL) {
+        s_datapath_wake = xSemaphoreCreateBinary();
+        if (s_datapath_wake == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    /* 4096 matches this project's other long-lived worker tasks
+     * (wifi_reconnect, halow_reconnect, cot_relay) and is well clear of what
+     * bring_up_datapath() needs. Unlike them, this one is not long-lived - it
+     * exits once the datapath is up (see datapath_task()). */
+    if (xTaskCreate(datapath_task, "datapath", GW_STACK_DATAPATH, NULL, 5, &s_datapath_task) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+/* Forces a real reset pulse on the MM6108 HaLow radio before either role's
+ * bring-up ever touches it.
+ *
+ * mmhalow_init() (morsemicro/halow 2.11.2-esp32-2's mmhal_init(),
+ * components/shims/mmhal_os.c) drives CONFIG_MM_RESET_N low, and later -
+ * inside mmwlan_boot()'s internal call to mmhal_wlan_init(),
+ * components/shims/mmhal_wlan.c - raises it high again, with no deliberate
+ * delay of its own in between. That is a valid reset from a cold boot, where
+ * the radio was never running and RESET_N starts however the board's own
+ * power-on state leaves it. It is not necessarily valid after a software
+ * esp_restart(): that resets the ESP32's own core, not the radio module, so
+ * if the radio was left running from before the reboot (e.g. left "up and
+ * scannable" per uplink_halow.c's own log line), the low-to-high flip may be
+ * too short to actually resync it.
+ *
+ * Reproduced twice on real hardware: after a config-save reboot in
+ * GW_ROLE_RELAY, downlink_halow_ap_init() hung inside mmhal_init()/
+ * mmwlan_init() (before either ever logs anything) and tripped the interrupt
+ * watchdog in task 'ipc0' - every time the reboot was esp_restart() (reset
+ * reason "software (esp_restart)" or the panic handler's own auto-reboot).
+ * Only a true hardware reset (reset reason "USB peripheral", from the web
+ * flasher's own reset button - nothing this firmware does) came up clean,
+ * both times. This gives every boot, cold or warm, a deliberate low pulse
+ * before mmhalow_init() ever runs, long enough that whatever internal timing
+ * morselib uses afterward starts from a real reset instead of racing one.
+ *
+ * mmhal_init() re-configures and re-asserts this same pin low right after -
+ * harmless, since it's already low - so this can only add to the reset
+ * window, never shorten it. */
+static void halow_radio_force_reset(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << CONFIG_MM_RESET_N,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&io_conf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "HaLow radio reset gpio_config failed: %s", esp_err_to_name(err));
+        return;
+    }
+    gpio_set_level(CONFIG_MM_RESET_N, 0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    /* Reproduced on real hardware in GW_ROLE_RELAY specifically (HaLow AP
+     * mode): once armed, every subsequent esp_restart() reboot panics with
+     * "Interrupt wdt timeout on CPU0" inside gpio_install_isr_service() -
+     * before mmhal_init() (components/shims/mmhal_os.c) or anything it calls
+     * has logged a single line - with the crashed task's own PC landing in
+     * gpio_isr_loop (esp-idf v5.5.1 esp_driver_gpio/src/gpio.c). That is the
+     * shared GPIO ISR dispatcher spinning on an interrupt no per-pin handler
+     * is registered for yet, which happens when a pin is already configured
+     * level-triggered and asserted at the moment the shared ISR is enabled.
+     *
+     * components/shims/mmhal_wlan.c:237 configures exactly one pin that way -
+     * gpio_set_intr_type(CONFIG_MM_SPI_IRQ, GPIO_INTR_LOW_LEVEL) - as part of
+     * normal AP-mode bring-up. The RESET_N pulse above only resets the
+     * *radio chip*; it can't touch this, because it's a register on the
+     * ESP32-S3's own GPIO peripheral, not the chip's. esp_restart() triggers
+     * what esp-idf calls a "system reset" (esp_system/esp_system.c
+     * esp_restart_noos(), via the RTC watchdog's WDT_STAGE_ACTION_RESET_SYSTEM)
+     * - and 38 identical crashes in a row on pure software reboots (no power
+     * cycle in between, confirmed on real hardware) show that reset does not
+     * clear this particular register, so once one boot arms it, every
+     * following esp_restart() re-arms the same storm before a handler is
+     * registered to service it.
+     *
+     * gpio_reset_pin() (v5.5.1 esp_driver_gpio/src/gpio.c:456) calls
+     * gpio_intr_disable() first, which writes GPIO_INTR_DISABLE into that
+     * same hardware field directly - so this clears it regardless of what a
+     * previous, possibly-crashed boot left armed, before mmhalow_init() ever
+     * runs. A no-op if the pin was already clean. */
+    gpio_reset_pin(CONFIG_MM_SPI_IRQ);
+}
+
+/* Today's original design: local 2.4GHz SoftAP for phones/ATAK devices,
+ * HaLow STA uplink to whatever AP is configured. Unchanged behaviour from
+ * before GW_ROLE existed - only pulled into its own function so app_main()
+ * can pick between this and bring_up_relay_role(). */
+static void bring_up_client_role(gw_config_t *cfg)
+{
+    /* SoftAP first: it doesn't depend on the uplink and should be usable
+     * standalone - it's the natural first hardware test. */
+    esp_err_t err = downlink_softap_init(&cfg->softap);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SoftAP bring-up failed: %s", esp_err_to_name(err));
+    }
+
+    /* Same config, second transport: reachable at the SoftAP's IP once
+     * connected to it. The SoftAP netif is passed so the server can refuse
+     * requests arriving from the mesh over the uplink - these endpoints are
+     * unauthenticated. */
+    err = web_ui_start(cfg, downlink_softap_get_netif());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "web UI start failed: %s", esp_err_to_name(err));
+    }
+
+    /* The console and web UI are already accepting edits by now, so take a
+     * consistent snapshot rather than letting the radio read a half-updated
+     * struct. */
+    provisioning_config_lock();
+    gw_uplink_config_t uplink_cfg = cfg->uplink;
+    provisioning_config_unlock();
+
+    err = uplink_halow_init(&uplink_cfg);
+    if (err != ESP_OK) {
+        /* Deliberately *not* followed by uplink_halow_start(). A reconnect
+         * loop against a radio that never initialized just spins, and its
+         * error log every second buries the line above that says why. The
+         * node stays useful in this state: SoftAP, web UI (whose status panel
+         * reports "radio failed") and console all still work, which is what
+         * you want when the cause is a wiring or BCF mismatch you're about to
+         * go and fix. */
+        ESP_LOGE(TAG, "HaLow uplink init failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "the radio is unavailable - check the CONFIG_MM_* pin/BCF config against "
+                      "the board (design/HARDWARE.md); SoftAP and config UI remain up");
+    } else if (!gw_uplink_is_configured(&uplink_cfg)) {
+        /* Not an error, and deliberately not followed by uplink_halow_start().
+         * A factory-fresh node has nothing to associate with, so the reconnect
+         * loop would only generate failures that look like a fault and keep
+         * the radio busy while the operator is trying to scan with it. The
+         * link state reports "not configured" and the LED gets its own
+         * pattern, so this is visible rather than silent. */
+        ESP_LOGW(TAG, "no HaLow uplink configured yet - join '%s' and open http://%s/ to scan "
+                      "for your gateway's AP, then save and reboot",
+                 cfg->softap.ssid, cfg->softap.use_custom_subnet ? cfg->softap.ip : "192.168.4.1");
+    } else {
+        /* Before the callback is registered, not after: the uplink can report
+         * an IP as soon as it's started, and on_uplink_state() silently drops
+         * the notification if the task doesn't exist yet. */
+        err = datapath_task_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start the datapath task: %s", esp_err_to_name(err));
+        }
+        uplink_halow_set_state_callback(on_uplink_state, cfg);
+        err = uplink_halow_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start HaLow reconnect task: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+/* GW_ROLE_RELAY: HaLow AP downlink (so client-role XIAOs have something to
+ * associate to - design/PI_SIDE.md item 0), native Wi-Fi STA uplink to the
+ * Pi's own local AP. See design/ROADMAP.md item 8 for the full reasoning,
+ * including why this hop uses static IPs instead of DHCP. */
+static void bring_up_relay_role(gw_config_t *cfg)
+{
+    /* HaLow AP first, same "usable standalone" reasoning as the SoftAP in
+     * the client role - a relay with no uplink yet should still be joinable
+     * by leaf XIAOs for bench testing between them. */
+    esp_err_t err = downlink_halow_ap_init(&cfg->halow_ap);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HaLow AP bring-up failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "the radio is unavailable - check the CONFIG_MM_* pin/BCF config against "
+                      "the board (design/HARDWARE.md)");
+    }
+
+    /* Reachable from a leaf XIAO already associated to this relay's HaLow AP
+     * (or a laptop bench-testing that link directly) - same subnet-restricted
+     * trust model the client role uses, just against the HaLow AP netif
+     * instead of the SoftAP one, since a relay runs no SoftAP of its own. */
+    err = web_ui_start(cfg, downlink_halow_ap_get_netif());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "web UI start failed: %s", esp_err_to_name(err));
+    }
+
+    provisioning_config_lock();
+    gw_wifi_uplink_config_t wifi_cfg = cfg->wifi_uplink;
+    provisioning_config_unlock();
+
+    err = uplink_wifi_init(&wifi_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi uplink init failed: %s", esp_err_to_name(err));
+    } else if (!gw_wifi_uplink_is_configured(&wifi_cfg)) {
+        ESP_LOGW(TAG, "no Wi-Fi uplink configured yet - associate to this relay's HaLow AP and "
+                      "open http://%s/ to set the Pi's local AP as the uplink, then save and reboot",
+                 cfg->halow_ap.ip);
+    } else {
+        /* Same ordering requirement as the client role above. */
+        err = datapath_task_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start the datapath task: %s", esp_err_to_name(err));
+        }
+        uplink_wifi_set_state_callback(on_uplink_state, cfg);
+        err = uplink_wifi_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start Wi-Fi uplink: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+void app_main(void)
+{
+    /* First, so the ring captures boot logs too - the ones that say whether
+     * the radio came up are the ones you most want to read back later. */
+    esp_err_t err = log_buffer_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "log buffer init failed: %s", esp_err_to_name(err));
+    }
+
+    /* Immediately after the ring exists, so "why did we restart?" is the first
+     * thing anyone reads back over /api/log - and so it survives being asked
+     * from a phone with no serial cable in sight. */
+    log_boot_diagnostics();
+
+    ESP_ERROR_CHECK(provisioning_init());
+    provisioning_load(&s_cfg);
+
+    /* After provisioning_load() so auth.c reads the just-loaded credential
+     * (or its all-zero, password_set==false default) immediately, not a
+     * stale in-memory zero from before NVS was read. Not inside
+     * web_ui_start(): provisioning.c's gwcfg-reset-auth console command (a
+     * sibling module, not a descendant of web_ui.c) needs
+     * auth_drop_all_sessions() too. */
+    err = auth_init(&s_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "auth init failed: %s", esp_err_to_name(err));
+    }
+
+    /* Also after provisioning_load(), same ordering reason as auth_init()
+     * above - generates the device's self-signed HTTPS identity on first
+     * boot (or loads the existing one) and logs its fingerprint, so it's
+     * available before web_ui_start() ever needs it. Review finding F02,
+     * design/PROJECT_REVIEW_2026-09-10.md. */
+    err = tls_identity_init(&s_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "TLS identity init failed: %s", esp_err_to_name(err));
+    }
+
+    /* Before either role's uplink_halow_init()/downlink_halow_ap_init() -
+     * both route every non-TX radio call through radio_control_run() from
+     * their own init function onward, so the owner task must already exist
+     * by the time bring_up_client_role()/bring_up_relay_role() run below.
+     * Review finding F06, design/PROJECT_REVIEW_2026-09-10.md. */
+    err = radio_control_init();
+    if (err != ESP_OK) {
+        /* Logged at error level, not warning like the others above: every
+         * radio call in both roles goes through this from here on, so
+         * uplink_halow_init()/downlink_halow_ap_init() (called from
+         * bring_up_client_role()/bring_up_relay_role() below) will each
+         * fail their own first radio_control_run() call and report "radio
+         * not initialized" - a real but much less direct symptom of this
+         * actual cause. Not aborted here: the rest of bring-up (SoftAP,
+         * web UI, console) is still useful without HaLow. */
+        ESP_LOGE(TAG, "radio_control_init failed: %s - HaLow will not be available this boot",
+                 esp_err_to_name(err));
+    }
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* Started before the radio: until uplink_halow_init()/uplink_wifi_init()
+     * runs, the link state reads as "not up yet", so the LED shows that from
+     * the first moment there's power rather than staying dark through
+     * bring-up. */
+    err = status_led_start(s_cfg.role);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "status LED start failed: %s", esp_err_to_name(err));
+    }
+
+    /* Independent of role - both a relay and a client sit in the same
+     * enclosure and can run hot. Non-fatal on failure: chip_temp_read_celsius()
+     * then just always reports "no data" to the web UI. */
+    err = chip_temp_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "chip temperature sensor init failed: %s", esp_err_to_name(err));
+    }
+
+    /* Also independent of role and started before either uplink exists -
+     * early samples just read INT16_MIN (link_history.c's "no reading yet"
+     * sentinel) until bring_up_client_role()/bring_up_relay_role() below
+     * brings the real uplink up, which is harmless and means the history
+     * naturally covers the whole boot-to-associated window. */
+    err = link_history_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "link RSSI history init failed: %s", esp_err_to_name(err));
+    }
+
+    /* The config-recovery escape hatch. Started early and independently of
+     * everything below so it still works when the SoftAP/HaLow AP or the
+     * radio doesn't - which is exactly when it's needed. */
+    err = factory_reset_start(&s_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "factory reset watcher failed to start: %s", esp_err_to_name(err));
+    }
+
+    provisioning_register_console_commands(&s_cfg);
+    err = provisioning_start_console();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "console start failed: %s", esp_err_to_name(err));
+    }
+
+    /* Before either role touches the radio - see this function's own doc
+     * comment for why a plain esp_restart() reboot isn't enough on its own. */
+    halow_radio_force_reset();
+
+    /* Console is up regardless of role by this point - gwcfg-* always works
+     * over USB, which matters most for GW_ROLE_RELAY: it has no SoftAP, so
+     * before its Wi-Fi uplink and HaLow AP are both configured the console
+     * (or a temporary direct HaLow association to reach the web UI) is the
+     * only way in. */
+    if (s_cfg.role == GW_ROLE_RELAY) {
+        bring_up_relay_role(&s_cfg);
+    } else {
+        bring_up_client_role(&s_cfg);
+    }
+
+    /* After the role branch above, not alongside chip_temp_init()/
+     * link_history_init(): unlike those two, this needs the SoftAP netif
+     * bring_up_client_role() -> downlink_softap_init() just created (NULL on
+     * GW_ROLE_RELAY, which runs no SoftAP - see heap_guard.h). */
+    err = heap_guard_init(s_cfg.role == GW_ROLE_RELAY ? NULL : downlink_softap_get_netif());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "heap guard init failed: %s", esp_err_to_name(err));
+    }
+
+    const esp_app_desc_t *desc = esp_app_get_description();
+    ESP_LOGI(TAG, "xiao-halow-gateway up: version=%s node_id=%s role=%s",
+             desc ? desc->version : "unknown",
+             s_cfg.node_id,
+             s_cfg.role == GW_ROLE_RELAY ? "relay" : "client");
+}
