@@ -115,10 +115,34 @@ Two boards on the desk, 2 MHz channel 26, 8 dBm:
 - Unicast pings over the mesh: 14 to 29 ms, 6 of 6 answered.
 - Range: chat between a phone on one board and the other board 245 ft away, through an
   aluminium-sided house wall, at the 8 dBm bench power cap.
-- Photos: 150 KB in 2.4 s and 300 KB in 5.1 s board to board over the mesh (TCP over
-  the flooded-then-routed path), about 500 kbit/s on the desk. Phones shrink photos to
-  1024 px JPEG before upload; the limit is 400 KB per photo, six photos kept per board in
-  PSRAM, not kept across a reboot.
+- Photos: a 300 KB photo crosses board to board in 2.6 s (935 kbit/s) on the 2 MHz
+  channel with 32 KB TCP windows. Phones shrink photos to 1024 px JPEG before upload; the
+  limit is 400 KB per photo, six photos kept per board in PSRAM, not kept across a reboot.
+
+### Speed, and why it is not 15 Mbit/s
+
+HaLow's headline numbers are the radio's raw rate on an 8 MHz channel at its highest
+modulation in perfect conditions. What a transfer actually gets depends on the channel
+width, the modulation the link can hold, how the host feeds the chip, and TCP. Measured
+here with a 300 KB photo between two boards on the desk:
+
+| Channel | TCP window | Rate selection | 300 KB took | Speed |
+|---|---|---|---|---|
+| 2 MHz | 5.7 KB (default) | MCS0 only | 12.0 s | 205 kbit/s |
+| 2 MHz | 5.7 KB | by RSSI | 5.1 s | 481 kbit/s |
+| 2 MHz | 32 KB | by RSSI | 2.6 s | 935 kbit/s |
+| 8 MHz | 32 KB | by RSSI | 3.2 s | 777 kbit/s, lossier pings |
+
+The 8 MHz channel (opclass 71, channel 44) quadruples the radio's rate per modulation but
+needs 6 dB more signal, so it did not help on this path and would cost range in the field.
+The remaining ceiling, around 1 Mbit/s, is the ESP32 side: every frame is built by the host
+and handed to the chip one at a time, with no frame aggregation, the same limit the Ottercam
+bridge hit on this hardware. The next steps for speed, in order, are frame aggregation
+(A-MPDU through morselib's data path), short guard interval, and fewer copies in the
+receive path.
+
+TX power is a different knob: it buys range, not speed. The bench cap of 8 dBm keeps boards
+on one desk from overloading each other; in the field, raise it from the page.
 
 Multi-hop relaying is implemented but untested: it needs a third board placed out of range
 of the first. Mesh peering (the 802.11s handshake), path selection (HWMP) and encryption are

@@ -24,3 +24,9 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
+
+# Bigger TCP windows: photos between boards went from about 500 to about 900 kbit/s on a
+# 2 MHz channel with these, against ESP-IDF's 5.7 KB default.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32

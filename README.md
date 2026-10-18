@@ -48,9 +48,10 @@ you, do not flash it.
 - Not implemented: 802.11s peering, HWMP path selection, encryption. The mesh is open and
   uses flooding with a hop limit, duplicate suppression and routes learned from traffic.
 - Photos work and double as a speed test: a 300 KB photo crosses from one board to the
-  other in about 5 s, roughly 500 kbit/s on the desk at a 2 MHz channel. Unicast frames
-  pick their rate from the neighbour's signal strength; without that it was 130 to
-  200 kbit/s. Chat and photos are fine, video is not.
+  other in 2.6 s, about 900 kbit/s on the desk at a 2 MHz channel, with rate selection by
+  signal strength and 32 KB TCP windows. At the SDK's defaults it was 200 kbit/s. Chat and
+  photos are fine, video is not; the ceiling is the ESP32 feeding the chip one frame at a
+  time, not the radio.
 
 ## Quick start
 
