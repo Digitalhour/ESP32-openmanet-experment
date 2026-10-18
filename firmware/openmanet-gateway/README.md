@@ -1,5 +1,14 @@
 # OpenMANET-XIAO-Gateway
 
+> **HalowChat merge, 2026-10-18.** This is Will Shields' OpenMANET-XIAO-Gateway, imported into
+> the HalowChat repository with its full history, plus one addition: a third node role,
+> `mesh`, which runs the HaLow radio as an 802.11s-style mesh point (`main/mesh.c`, from
+> HalowChat) instead of a station on somebody's access point. The mesh role is the default
+> for factory-fresh nodes in this tree (`CONFIG_GW_DEFAULT_ROLE_MESH`); `gwcfg-set-role
+> client` or `relay` restores the original behaviour. Everything below this note is the
+> original README and still applies to the client and relay roles.
+
+
 Firmware for a Seeed XIAO ESP32-S3 + Seeed XIAO WM6108 (HaLow) node that acts as a mesh-connected
 access point for the [OpenMANET](https://github.com/d3mocide) project: phones/tablets/ATAK devices
 associate to the XIAO's local 2.4GHz Wi-Fi AP, and the XIAO relays their IP traffic — including

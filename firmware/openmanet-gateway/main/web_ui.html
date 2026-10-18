@@ -702,6 +702,25 @@
       </div>
     </div>
 
+    <!-- GW_ROLE_MESH card: HaLow mesh among XIAOs + local 2.4GHz SoftAP -->
+    <div id="overviewMesh" hidden>
+      <div class="hud-card">
+        <div class="card-header">
+          <span class="card-title">HaLow Mesh</span>
+          <span class="badge badge-muted">802.11s style</span>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric"><span class="metric-label">State</span><span class="metric-value" id="stMeshState">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">Mesh</span><span class="metric-value" id="stMeshId">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">IP on mesh</span><span class="metric-value" id="stMeshIp">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">Neighbours</span><span class="metric-value" id="stMeshNeighbours">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">Routes</span><span class="metric-value" id="stMeshRoutes">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">Frames</span><span class="metric-value" id="stMeshFrames">&mdash;</span></div>
+        </div>
+        <p class="hint" id="stMeshList"></p>
+      </div>
+    </div>
+
     <!-- GW_ROLE_RELAY cards: native Wi-Fi STA uplink to the Pi + HaLow AP downlink for leaf XIAOs -->
     <div id="overviewRelay" hidden>
       <div class="hud-card">
@@ -810,6 +829,10 @@
         <div class="role-card" id="roleCardRelay">
           <span class="role-title">Relay (Bridge)</span>
           <p class="role-desc">Joins Pi via local Wi-Fi. Broadcasts HaLow AP to connect distant leaf XIAOs.</p>
+        </div>
+        <div class="role-card" id="roleCardMesh">
+          <span class="role-title">Mesh (Hubless)</span>
+          <p class="role-desc">Phones/ATAK connect via 2.4GHz Wi-Fi. HaLow forms a mesh with every other mesh XIAO in range. No Pi, no AP, nothing to pair.</p>
         </div>
       </div>
       <input type="hidden" id="node_role" value="client">
@@ -1455,6 +1478,15 @@ document.querySelectorAll('.tab-btn').forEach(function(btn) {
 // Role Switcher Cards
 function setRole(role) {
   el('node_role').value = role;
+  el('roleCardMesh').classList.toggle('selected', role === 'mesh');
+  if (role === 'mesh') {
+    el('roleCardClient').classList.remove('selected');
+    el('roleCardRelay').classList.remove('selected');
+    el('clientFields').hidden = true;
+    el('relayFields').hidden = true;
+    el('hdrRoleBadge').textContent = 'Mesh Node';
+    return;
+  }
   if (role === 'relay') {
     el('roleCardRelay').classList.add('selected');
     el('roleCardClient').classList.remove('selected');
@@ -1476,6 +1508,7 @@ function setRole(role) {
 
 el('roleCardClient').addEventListener('click', function() { setRole('client'); });
 el('roleCardRelay').addEventListener('click', function() { setRole('relay'); });
+el('roleCardMesh').addEventListener('click', function() { setRole('mesh'); });
 
 // Static IP checkbox toggle
 el('uplink_use_static_ip').addEventListener('change', function() {
@@ -1493,8 +1526,21 @@ async function loadStatus() {
     el('hdrNode').textContent = s.node_id || 'xiao-gw';
 
     var isRelay = s.role === 'relay';
-    el('overviewClient').hidden = isRelay;
+    var isMesh = s.role === 'mesh';
+    el('overviewClient').hidden = isRelay || isMesh;
     el('overviewRelay').hidden = !isRelay;
+    el('overviewMesh').hidden = !isMesh;
+    if (isMesh) {
+      var m = s.mesh || {};
+      var nbs = m.neighbours || [];
+      el('stMeshState').textContent = m.state || '\u2014';
+      el('stMeshId').textContent = (m.id || '') + ' / ch ' + (m.channel || '');
+      el('stMeshIp').textContent = m.ip || '\u2014';
+      el('stMeshNeighbours').textContent = nbs.length;
+      el('stMeshRoutes').textContent = (typeof m.routes === 'number') ? m.routes : '\u2014';
+      el('stMeshFrames').textContent = 'tx ' + (m.tx || 0) + ' / rx ' + (m.rx || 0) + ' / relayed ' + (m.forwarded || 0);
+      el('stMeshList').textContent = nbs.map(function(n) { return n.addr + ' (' + n.rssi + ' dBm)'; }).join(', ') || 'no neighbours heard yet';
+    }
 
     if (isRelay) {
       var wu = s.wifi_uplink || {};

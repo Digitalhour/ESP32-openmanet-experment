@@ -38,6 +38,13 @@ you, do not flash it.
 
 ## Status (2026-10-18)
 
+- **The gateway runs on the mesh.** `firmware/openmanet-gateway` has a third node role,
+  `mesh`, on by default: Will Shields' phone hotspot, NAT and ATAK CoT multicast relay, with
+  the HaLow radio as a mesh point instead of a station. Two boards on the desk: both come up
+  as mesh nodes, see each other, NAT their hotspots onto the mesh and join the CoT group on
+  both sides. Phones on different boards should see each other in ATAK. Untested with ATAK
+  itself so far.
+
 - Mesh chat runs on two boards: both bring up the mesh on the stock chip firmware, find
   each other from beacons, discover each other's chat in under 20 s, and unicast pings
   across the mesh answer in about 15 ms.
@@ -55,6 +62,28 @@ you, do not flash it.
   time, not the radio.
 
 ## Quick start
+
+Two firmwares to choose from. The gateway is the one for ATAK and OpenMANET work; the chat
+is the one with the chat page and photos.
+
+**Gateway (mesh role):**
+
+```bash
+. ~/esp/esp-idf/export.sh
+cd firmware/openmanet-gateway
+idf.py set-target esp32s3
+idf.py -p /dev/cu.usbmodemXXXX flash monitor
+```
+
+Join `xiao-gateway-xxxx` (password `openmanet`), open `http://172.16.50.1/`, set a login
+password on first use. The overview shows the HaLow Mesh card: state, mesh name and channel,
+IP on the mesh, neighbours with signal, routes, frame counters. ATAK on a phone on one board
+and ATAK on a phone on another board should see each other through the CoT relay. The
+serial console's `gwcfg-status` prints the same. Mesh name, channel and power are build-time
+settings under "OpenMANET XIAO Gateway: mesh role" in `idf.py menuconfig`; the chat and the
+gateway can share a mesh if both use the same name and channel.
+
+**Chat:**
 
 ```bash
 . ~/esp/esp-idf/export.sh

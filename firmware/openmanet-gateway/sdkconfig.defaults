@@ -348,3 +348,8 @@ CONFIG_ESP_HTTPS_SERVER_ENABLE=y
 # passphrases already have sitting in cleartext NVS at rest - not a new gap,
 # and worth revisiting together with F14 rather than in isolation.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Bigger TCP windows for the mesh role (about 900 kbit/s board to board instead of 500).
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32

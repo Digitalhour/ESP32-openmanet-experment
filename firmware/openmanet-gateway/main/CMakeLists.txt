@@ -21,8 +21,11 @@ idf_component_register(
         "tls_identity.c"
         "radio_control.c"
         "net_validate.c"
+        "mesh.c"
+        "uplink_mesh.c"
     INCLUDE_DIRS "."
     REQUIRES
+        esp_driver_spi
         esp_wifi
         esp_netif
         esp_event
@@ -103,3 +106,15 @@ add_custom_command(
 target_add_binary_data(${COMPONENT_LIB} "${web_ui_embedded}" "BINARY"
     RENAME_TO web_ui_html
     DEPENDS "${web_ui_embedded}")
+
+# The mesh role (mesh.c) hooks into morselib: the esp-halow build prefixes morselib's
+# internals with mmint_. See mesh.c's top comment and the HalowChat README for each hook.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=spi_bus_add_device")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmhal_wlan_hard_reset")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmwlan_set_channel_list")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_morse_cmd_tx")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_mmdrv_add_if")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_umac_ap_get_beacon")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_mmdrv_host_process_rx_frame")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_mmdrv_tx_frame")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmint_umac_rc_init_rate_table_mgmt")

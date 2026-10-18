@@ -32,6 +32,7 @@
 #include "tls_identity.h"
 #include "uplink_halow.h"
 #include "uplink_wifi.h"
+#include "uplink_mesh.h"
 #include "web_ui.h"
 
 static const char *TAG = "app_main";
@@ -343,6 +344,11 @@ static void datapath_task(void *arg)
             /* Native Wi-Fi STA uplink (to the Pi's local AP), HaLow AP
              * downlink (to leaf XIAOs). */
             bring_up_datapath(downlink_halow_ap_get_netif(), uplink_wifi_get_netif(), &cot, true);
+        } else if (role == GW_ROLE_MESH) {
+            /* No DNS server lives on the mesh, so no forwarder; NAT and the CoT relay do
+             * the work. CoT multicast rides the mesh as flooded group frames, so every
+             * mesh node's ATAK devices see each other. */
+            bring_up_datapath(downlink_softap_get_netif(), uplink_mesh_get_netif(), &cot, false);
         } else {
             /* HaLow STA uplink, local SoftAP downlink. */
             bring_up_datapath(downlink_softap_get_netif(), uplink_halow_get_netif(), &cot, false);
@@ -620,6 +626,38 @@ static void bring_up_relay_role(gw_config_t *cfg)
     }
 }
 
+/* The mesh has no association phase to wait through, so the datapath task is started
+ * from this callback, when the mesh netif exists, instead of before the radio comes up. */
+static void on_mesh_up(bool connected, void *ctx)
+{
+    if (connected) {
+        esp_err_t err = datapath_task_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start the datapath task: %s", esp_err_to_name(err));
+        }
+    }
+    on_uplink_state(connected, ctx);
+}
+
+/* GW_ROLE_MESH: local SoftAP for phones/ATAK devices (same as the client role), HaLow as
+ * an 802.11s-style mesh point among other mesh nodes (main/mesh.c), nothing to configure. */
+static void bring_up_mesh_role(gw_config_t *cfg)
+{
+    esp_err_t err = downlink_softap_init(&cfg->softap);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SoftAP bring-up failed: %s", esp_err_to_name(err));
+    }
+    err = web_ui_start(cfg, downlink_softap_get_netif());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "web UI start failed: %s", esp_err_to_name(err));
+    }
+    uplink_mesh_set_state_callback(on_mesh_up, cfg);
+    err = uplink_mesh_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start the mesh: %s", esp_err_to_name(err));
+    }
+}
+
 void app_main(void)
 {
     /* First, so the ring captures boot logs too - the ones that say whether
@@ -732,6 +770,8 @@ void app_main(void)
      * only way in. */
     if (s_cfg.role == GW_ROLE_RELAY) {
         bring_up_relay_role(&s_cfg);
+    } else if (s_cfg.role == GW_ROLE_MESH) {
+        bring_up_mesh_role(&s_cfg);
     } else {
         bring_up_client_role(&s_cfg);
     }
@@ -749,5 +789,5 @@ void app_main(void)
     ESP_LOGI(TAG, "xiao-halow-gateway up: version=%s node_id=%s role=%s",
              desc ? desc->version : "unknown",
              s_cfg.node_id,
-             s_cfg.role == GW_ROLE_RELAY ? "relay" : "client");
+             provisioning_role_name(s_cfg.role));
 }

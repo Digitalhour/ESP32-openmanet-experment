@@ -11,6 +11,7 @@
 #include "task_stats.h"
 #include "uplink_halow.h"
 #include "uplink_wifi.h"
+#include "uplink_mesh.h"
 
 static const char *TAG = "status_led";
 
@@ -84,7 +85,9 @@ static void status_led_task(void *arg)
             pattern = ATTENTION_PATTERN;
         } else {
             uplink_link_state_t state =
-                (s_role == GW_ROLE_RELAY) ? relay_led_state() : uplink_halow_get_link_state();
+                (s_role == GW_ROLE_RELAY) ? relay_led_state()
+                : (s_role == GW_ROLE_MESH) ? (uplink_mesh_is_connected() ? UPLINK_LINK_UP : UPLINK_LINK_ASSOCIATING)
+                                           : uplink_halow_get_link_state();
             pattern = ((size_t)state < sizeof(s_patterns) / sizeof(s_patterns[0]))
                           ? s_patterns[state]
                           : s_patterns[UPLINK_LINK_DOWN];

@@ -192,10 +192,11 @@ esp_err_t __real_spi_bus_add_device(spi_host_device_t host, const spi_device_int
 esp_err_t __wrap_spi_bus_add_device(spi_host_device_t host, const spi_device_interface_config_t *dev_config,
                                     spi_device_handle_t *handle)
 {
-    if (host == SPI2_HOST && dev_config->spics_io_num < 0 && dev_config->clock_speed_hz > CONFIG_CHAT_HALOW_SPI_MAX_HZ)
+    uint32_t cap = s_cfg.spi_max_hz ? s_cfg.spi_max_hz : 40000000U;
+    if (host == SPI2_HOST && dev_config->spics_io_num < 0 && dev_config->clock_speed_hz > (int)cap)
     {
         spi_device_interface_config_t capped = *dev_config;
-        capped.clock_speed_hz = CONFIG_CHAT_HALOW_SPI_MAX_HZ;
+        capped.clock_speed_hz = (int)cap;
         return __real_spi_bus_add_device(host, &capped, handle);
     }
     return __real_spi_bus_add_device(host, dev_config, handle);
@@ -204,9 +205,9 @@ esp_err_t __wrap_spi_bus_add_device(spi_host_device_t host, const spi_device_int
 void __wrap_mmhal_wlan_hard_reset(void)
 {
     gpio_set_level(CONFIG_MM_RESET_N, 0);
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_CHAT_HALOW_RESET_HOLD_MS));
+    vTaskDelay(pdMS_TO_TICKS(s_cfg.reset_hold_ms ? s_cfg.reset_hold_ms : 8000));
     gpio_set_level(CONFIG_MM_RESET_N, 1);
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_CHAT_HALOW_RESET_SETTLE_MS));
+    vTaskDelay(pdMS_TO_TICKS(s_cfg.reset_settle_ms ? s_cfg.reset_settle_ms : 250));
 }
 
 /* The whole mesh lives on one channel; give morselib only the channels inside it (2 MHz and
@@ -219,6 +220,10 @@ enum mmwlan_status __real_mmwlan_set_channel_list(const struct mmwlan_s1g_channe
 
 enum mmwlan_status __wrap_mmwlan_set_channel_list(const struct mmwlan_s1g_channel_list *list)
 {
+    if (s_cfg.s1g_chan == 0)
+    {
+        return __real_mmwlan_set_channel_list(list);   /* no mesh configured: leave the list alone */
+    }
     const struct mmwlan_s1g_channel *anchor = NULL;
     for (unsigned i = 0; list != NULL && i < list->num_channels; i++)
     {

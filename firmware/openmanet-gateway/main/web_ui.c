@@ -17,6 +17,8 @@
 #include "tls_identity.h"
 #include "uplink_halow.h"
 #include "uplink_wifi.h"
+#include "uplink_mesh.h"
+#include "mesh.h"
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
@@ -102,7 +104,9 @@ static esp_netif_t *uplink_netif(void)
     if (s_cfg == NULL) {
         return NULL;
     }
-    return (s_cfg->role == GW_ROLE_RELAY) ? uplink_wifi_get_netif() : uplink_halow_get_netif();
+    return (s_cfg->role == GW_ROLE_RELAY) ? uplink_wifi_get_netif()
+         : (s_cfg->role == GW_ROLE_MESH) ? uplink_mesh_get_netif()
+                                          : uplink_halow_get_netif();
 }
 
 /* Is peer_addr on netif's own subnet? Fails closed: a netif with no address
@@ -573,6 +577,42 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * downlink_halow_ap_get_sta_count()'s own comment. */
     cJSON_AddNumberToObject(halow_ap, "connected_clients", downlink_halow_ap_get_sta_count());
     add_netif_ip(halow_ap, "ip", downlink_halow_ap_get_netif());
+
+    /* GW_ROLE_MESH's status, reported unconditionally like the relay's: harmless zeros on
+     * the other roles. */
+    cJSON *mesh = cJSON_AddObjectToObject(root, "mesh");
+    cJSON_AddStringToObject(mesh, "state", uplink_mesh_state_name());
+    cJSON_AddBoolToObject(mesh, "connected", uplink_mesh_is_connected());
+    cJSON_AddStringToObject(mesh, "id", CONFIG_GW_MESH_ID);
+    cJSON_AddNumberToObject(mesh, "channel", CONFIG_GW_MESH_S1G_CHANNEL);
+    add_netif_ip(mesh, "ip", uplink_mesh_get_netif());
+    {
+        uint8_t a[6];
+        mesh_get_addr(a);
+        char addr[18];
+        snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
+        cJSON_AddStringToObject(mesh, "addr", addr);
+    }
+    cJSON *neighbours = cJSON_AddArrayToObject(mesh, "neighbours");
+    struct mesh_neighbour nb[16];
+    int nn = mesh_get_neighbours(nb, 16);
+    for (int i = 0; i < nn; i++) {
+        cJSON *n = cJSON_CreateObject();
+        char addr[18];
+        snprintf(addr, sizeof(addr), "%02x:%02x:%02x:%02x:%02x:%02x", nb[i].addr[0], nb[i].addr[1], nb[i].addr[2],
+                 nb[i].addr[3], nb[i].addr[4], nb[i].addr[5]);
+        cJSON_AddStringToObject(n, "addr", addr);
+        cJSON_AddNumberToObject(n, "rssi", nb[i].rssi);
+        cJSON_AddItemToArray(neighbours, n);
+    }
+    struct mesh_route rt[32];
+    cJSON_AddNumberToObject(mesh, "routes", mesh_get_routes(rt, 32));
+    struct mesh_stats ms;
+    mesh_get_stats(&ms);
+    cJSON_AddNumberToObject(mesh, "tx", ms.tx_frames);
+    cJSON_AddNumberToObject(mesh, "rx", ms.rx_frames);
+    cJSON_AddNumberToObject(mesh, "forwarded", ms.rx_forwarded);
+    cJSON_AddNumberToObject(mesh, "duplicates", ms.rx_duplicates);
 
     cJSON *sys = cJSON_AddObjectToObject(root, "system");
     cJSON_AddNumberToObject(sys, "uptime_s", (double)(esp_timer_get_time() / 1000000));

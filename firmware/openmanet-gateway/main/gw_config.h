@@ -96,6 +96,10 @@ extern "C" {
 typedef enum {
     GW_ROLE_CLIENT = 0,
     GW_ROLE_RELAY,
+    /* GW_ROLE_MESH: local 2.4GHz SoftAP for phones/ATAK devices like the client role, but
+     * the HaLow radio runs as an 802.11s-style mesh point (main/mesh.c) with every other mesh
+     * node in range, no access point anywhere. Added in the HalowChat merge. */
+    GW_ROLE_MESH,
 } gw_node_role_t;
 
 /* Security modes the HaLow uplink STA can be configured for. Must match

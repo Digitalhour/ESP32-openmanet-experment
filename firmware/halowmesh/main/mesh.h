@@ -25,6 +25,10 @@ struct mesh_config
     uint8_t opclass;    /* global operating class, e.g. 69 (2 MHz) */
     uint8_t tx_dbm;     /* cap, 0 = regulatory maximum */
     uint8_t ttl;        /* hop limit for frames this board sends */
+    /* Board bring-up knobs, 0 = the values proven on the XIAO + Wio-WM6180 bench. */
+    uint32_t spi_max_hz;      /* cap on the SPI clock to the chip (40 MHz) */
+    uint16_t reset_hold_ms;   /* how long the chip is held in reset (8000) */
+    uint16_t reset_settle_ms; /* chip boot time after reset (250) */
 };
 
 struct mesh_neighbour

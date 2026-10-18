@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "provisioning.h"
+#include "sdkconfig.h"
 
 #include "auth.h"
 #include "cot_relay.h"
@@ -25,6 +26,8 @@
 #include "tls_identity.h"
 #include "uplink_halow.h"
 #include "uplink_wifi.h"
+#include "uplink_mesh.h"
+#include "mesh.h"
 
 static const char *TAG = "provisioning";
 
@@ -115,7 +118,11 @@ void provisioning_get_defaults(gw_config_t *cfg)
     /* GW_ROLE_CLIENT: today's original design, and still what a factory-fresh
      * node ships as - a relay is a deliberate per-node choice
      * (gwcfg-set-role), not a default anyone should get by accident. */
+#if CONFIG_GW_DEFAULT_ROLE_MESH
+    cfg->role = GW_ROLE_MESH;
+#else
     cfg->role = GW_ROLE_CLIENT;
+#endif
 
     /* Off: see gw_config.h's own comment. An operator opts a specific node
      * into this, it never happens by accident. */
@@ -574,12 +581,12 @@ const char *provisioning_security_name(gw_security_mode_t sec)
 
 const char *provisioning_role_name(gw_node_role_t role)
 {
-    return role == GW_ROLE_RELAY ? "relay" : "client";
+    return role == GW_ROLE_RELAY ? "relay" : role == GW_ROLE_MESH ? "mesh" : "client";
 }
 
 gw_node_role_t provisioning_parse_role(const char *s)
 {
-    return strcmp(s, "relay") == 0 ? GW_ROLE_RELAY : GW_ROLE_CLIENT;
+    return strcmp(s, "relay") == 0 ? GW_ROLE_RELAY : strcmp(s, "mesh") == 0 ? GW_ROLE_MESH : GW_ROLE_CLIENT;
 }
 
 static void print_config(const gw_config_t *cfg)
@@ -587,7 +594,10 @@ static void print_config(const gw_config_t *cfg)
     printf("node_id       : %s\n", cfg->node_id);
     printf("role          : %s\n", provisioning_role_name(cfg->role));
     printf("uplink_mgmt   : %s\n", cfg->allow_uplink_management ? "on" : "off");
-    if (cfg->role == GW_ROLE_RELAY) {
+    if (cfg->role == GW_ROLE_MESH) {
+        printf("mesh id       : %s (channel %d, op class %d, build-time settings)\n", CONFIG_GW_MESH_ID,
+               CONFIG_GW_MESH_S1G_CHANNEL, CONFIG_GW_MESH_S1G_OPCLASS);
+    } else if (cfg->role == GW_ROLE_RELAY) {
         printf("wifi_uplink.ssid: %s\n", cfg->wifi_uplink.ssid);
         printf("halow_ap.ssid : %s\n", cfg->halow_ap.ssid);
         printf("halow_ap.security: %s\n", provisioning_security_name(cfg->halow_ap.security));
@@ -717,7 +727,7 @@ static int cmd_gwcfg_set_softap(int argc, char **argv)
 static int cmd_gwcfg_set_role(int argc, char **argv)
 {
     if (!s_cfg || argc != 2) {
-        printf("usage: gwcfg-set-role <client|relay>\n");
+        printf("usage: gwcfg-set-role <client|relay|mesh>\n");
         return 1;
     }
 
@@ -891,7 +901,17 @@ static int cmd_gwcfg_status(int argc, char **argv)
     printf("role          : %s\n", provisioning_role_name(role));
 
     esp_netif_t *uplink_netif;
-    if (role == GW_ROLE_RELAY) {
+    if (role == GW_ROLE_MESH) {
+        printf("mesh uplink   : %s\n", uplink_mesh_state_name());
+        struct mesh_neighbour nb[8];
+        int n = mesh_get_neighbours(nb, 8);
+        printf("mesh neighbours: %d\n", n);
+        for (int i = 0; i < n; i++) {
+            printf("  %02x:%02x:%02x:%02x:%02x:%02x  %d dBm\n", nb[i].addr[0], nb[i].addr[1], nb[i].addr[2],
+                   nb[i].addr[3], nb[i].addr[4], nb[i].addr[5], nb[i].rssi);
+        }
+        uplink_netif = uplink_mesh_get_netif();
+    } else if (role == GW_ROLE_RELAY) {
         printf("wifi uplink   : %s\n", uplink_wifi_link_state_name(uplink_wifi_get_link_state()));
         int8_t rssi = link_history_get_latest_wifi_rssi();
         if (rssi == INT8_MIN) {
@@ -1318,7 +1338,7 @@ esp_err_t provisioning_register_console_commands(gw_config_t *cfg)
         { .command = "gwcfg-set-node", .help = "Set node id: gwcfg-set-node <id>", .hint = NULL, .func = &cmd_gwcfg_set_node },
         { .command = "gwcfg-set-uplink", .help = "Set HaLow uplink STA config", .hint = NULL, .func = &cmd_gwcfg_set_uplink },
         { .command = "gwcfg-set-softap", .help = "Set local SoftAP config", .hint = NULL, .func = &cmd_gwcfg_set_softap },
-        { .command = "gwcfg-set-role", .help = "Set node role: gwcfg-set-role <client|relay>", .hint = NULL, .func = &cmd_gwcfg_set_role },
+        { .command = "gwcfg-set-role", .help = "Set node role: gwcfg-set-role <client|relay|mesh>", .hint = NULL, .func = &cmd_gwcfg_set_role },
         { .command = "gwcfg-set-uplink-mgmt", .help = "Allow/deny reaching the config UI from this node's own uplink: gwcfg-set-uplink-mgmt <on|off>", .hint = NULL, .func = &cmd_gwcfg_set_uplink_mgmt },
         { .command = "gwcfg-set-uplink-static-ip", .help = "Set/clear a static IP on the uplink (relay leaves only)", .hint = NULL, .func = &cmd_gwcfg_set_uplink_static_ip },
         { .command = "gwcfg-set-wifi-uplink", .help = "Set the relay role's native Wi-Fi uplink to the Pi", .hint = NULL, .func = &cmd_gwcfg_set_wifi_uplink },

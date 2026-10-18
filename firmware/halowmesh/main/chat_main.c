@@ -1055,6 +1055,9 @@ static void halow_task(void *arg)
     cfg.opclass = CONFIG_CHAT_S1G_OPCLASS;
     cfg.tx_dbm = s_tx_dbm;
     cfg.ttl = CONFIG_CHAT_MESH_TTL;
+    cfg.spi_max_hz = CONFIG_CHAT_HALOW_SPI_MAX_HZ;
+    cfg.reset_hold_ms = CONFIG_CHAT_HALOW_RESET_HOLD_MS;
+    cfg.reset_settle_ms = CONFIG_CHAT_HALOW_RESET_SETTLE_MS;
     if (mesh_start(&cfg) != ESP_OK)
     {
         ESP_LOGE(TAG, "Mesh failed to start; rebooting in 10 s");
