@@ -106,6 +106,8 @@ Two boards on the desk, 2 MHz channel 26, 8 dBm:
   beacons within a few seconds.
 - Boards discover each other through the chat's UDP broadcast within 20 s.
 - Unicast pings over the mesh: 14 to 29 ms, 6 of 6 answered.
+- Range: chat between a phone on one board and the other board 245 ft away, through an
+  aluminium-sided house wall, at the 8 dBm bench power cap.
 
 Multi-hop relaying is implemented but untested: it needs a third board placed out of range
 of the first. Mesh peering (the 802.11s handshake), path selection (HWMP) and encryption are

@@ -37,9 +37,12 @@ you, do not flash it.
 
 ## Status (2026-10-18)
 
-- Mesh chat runs on two boards on the desk: both bring up the mesh on the stock chip
-  firmware, find each other from beacons, discover each other's chat in under 20 s, and
-  unicast pings across the mesh answer in about 15 ms.
+- Mesh chat runs on two boards: both bring up the mesh on the stock chip firmware, find
+  each other from beacons, discover each other's chat in under 20 s, and unicast pings
+  across the mesh answer in about 15 ms.
+- First range test (2026-10-18): a phone on one board chatted with the other board 245 ft
+  away through the wall of a house with aluminium siding, with the TX power still capped
+  at 8 dBm (the bench setting; the chip allows far more).
 - Relaying through a middle board is implemented but not yet tested (needs a third board
   out of range of the first).
 - Not implemented: 802.11s peering, HWMP path selection, encryption. The mesh is open and
