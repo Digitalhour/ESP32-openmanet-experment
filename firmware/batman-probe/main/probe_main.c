@@ -175,7 +175,8 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
     {
         s_wifi_up = false;
-        ESP_LOGW(TAG, "Wi-Fi lost; reconnecting");
+        wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
+        ESP_LOGW(TAG, "Wi-Fi not connected (reason %d, rssi %d); retrying", d != NULL ? d->reason : -1, d != NULL ? d->rssi : 0);
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_wifi_connect();
     }

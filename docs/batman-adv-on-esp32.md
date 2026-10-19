@@ -242,6 +242,27 @@ batman-adv does not care what the link is. Plan:
 Step 2 proves the whole protocol implementation with no radio work at all, and it is the
 part that can start tomorrow.
 
+## Result: it works (2026-10-19)
+
+`firmware/batman-probe` is the implementation described above, 1700 lines of C. First test
+against the Umbrel box (Debian 13, batman-adv 2024.2, BATMAN_V on its wired port) with the
+XIAO on the home 2.4 GHz Wi-Fi:
+
+- Within two seconds of joining Wi-Fi the XIAO had the Linux node as neighbour and originator
+  and had pulled its full translation table (6 entries, ttvn 2). The Linux side listed the
+  XIAO's bat0 address in its global table and resolved it over ARP.
+- `ping` from the Linux `bat0` to the XIAO's `bat0`: 20 of 20 at 7 ms average once the tables
+  had synced (the first seconds after boot are lossy while the two sides exchange tables).
+- Full-size pings (1472-byte payload, so a 1500-byte IP packet that batman-adv must split):
+  10 of 10 both ways. 3000-byte and 8000-byte pings, which need IP fragmentation on top of
+  batman fragmentation: 10 of 10 and 5 of 5 (after turning lwIP's IP reassembly on; ESP-IDF
+  has it off by default).
+
+So the ESP32 is a working BATMAN_V node as far as Linux batman-adv is concerned: seen,
+routed, translated, fragmented, pinged. What is not exercised yet: more than one hop (needs
+a third node), roaming, and the real target, which is the same code over a peered HaLow
+mesh link (steps 4 and 5 of the roadmap).
+
 ## Open questions to settle on a real OpenMANET node
 
 - Mesh password: SAE on the mesh, and what `openmanet_mesh11sd` sets (`mesh_fwding`,
