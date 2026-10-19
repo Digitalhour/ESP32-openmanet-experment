@@ -1,0 +1,38 @@
+menu "batman-probe"
+
+    config BATP_WIFI_SSID
+        string "Wi-Fi network to join (the LAN the Linux batman-adv peer is on)"
+        default "nicc new"
+
+    config BATP_WIFI_PSK
+        string "Wi-Fi password"
+        default ""
+        help
+            Stored in sdkconfig (gitignored) and in the firmware. Enter it with
+            idf.py menuconfig.
+
+    config BATP_BAT_IP
+        string "Static IPv4 address on bat0 (empty = DHCP over the mesh)"
+        default "10.41.250.2"
+
+    config BATP_BAT_MASK
+        string "Netmask on bat0"
+        default "255.255.0.0"
+
+    config BATP_ORIG_INTERVAL_MS
+        int "OGM2 interval (ms)"
+        default 1000
+
+    config BATP_ELP_INTERVAL_MS
+        int "ELP interval (ms)"
+        default 500
+
+    config BATP_HOP_PENALTY
+        int "Hop penalty (0 to 255; Linux default 30)"
+        default 30
+
+    config BATP_LINK_THROUGHPUT
+        int "Assumed link throughput to each neighbour, in 100 kbit/s units (Linux default 10)"
+        default 10
+
+endmenu
