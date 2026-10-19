@@ -29,11 +29,19 @@ you, do not flash it.
 
 ## What this is for
 
-Cheap, disposable hop nodes. A XIAO plus the HaLow module is about 35 dollars. The idea is
-to put them high up, in a tree, on a pole, on a roof, wherever a mesh needs another hop, and
-not care much if one is lost or forgotten. Each one relays for the whole mesh. Phones, ATAK and
-the heavy work stay on the Pi nodes; the XIAOs extend the reach. `firmware/hopnode` is that
-node: the HaLow mesh link plus batman-adv and nothing else.
+Cheap, disposable hop nodes. At Seeed's prices as of October 2026 the two boards come to
+about 22 dollars: the Wi-Fi HaLow transceiver for XIAO at 14.90 and the XIAO ESP32-S3 at
+7.49. The idea is to put them high up, in a tree, on a pole, on a roof, wherever a mesh needs
+another hop, and not care much if one is lost or forgotten. Each one relays for the whole mesh.
+Phones, ATAK and the heavy work stay on the Pi nodes; the XIAOs extend the reach.
+`firmware/hopnode` is that node: the HaLow mesh link plus batman-adv and nothing else.
+
+**Build your own, cheaper.** Nothing here is tied to the XIAO. It is plain ESP-IDF plus Morse
+Micro's `morsemicro/halow` component, which Morse tests on the ESP32-C3, C6 and C5 as well as
+the S3. The hop node needs no PSRAM, no USB and no 2.4 GHz radio. A bare ESP32-C3 module and
+the HaLow module on a small carrier board with a battery connector is a relay for well under
+20 dollars; the only firmware change is the pin map in `sdkconfig.defaults`. If you make one,
+tell us what you built.
 
 ## Layout
 
