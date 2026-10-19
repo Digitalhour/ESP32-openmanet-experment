@@ -171,6 +171,9 @@ static volatile bool s_force_mesh_vif;
 static volatile bool s_patch_mesh_id;
 static struct mmpkt *s_data_pkt_in_flight;
 static int16_t s_tx_rssi_hint;   /* RSSI of the next hop for the frame in flight, INT16_MIN for broadcast */
+static bool s_tx_small;
+static uint32_t s_t_tx_us_sum, s_t_tx_us_max, s_t_tx_n, s_t_rxq_us_sum, s_t_rxq_us_max, s_t_rxq_n;           /* small frames go at the base rate: lower latency, nothing to gain from a faster one */
+#define SMALL_FRAME 256
 static char s_fw_version[32];
 static const struct mmwlan_s1g_channel *s_channel;
 
@@ -204,6 +207,7 @@ struct rx_item
     uint16_t len;
     int16_t rssi;
     uint8_t kind;                /* 0 data frame, 1 peering frame */
+    int64_t t_rx_us;
     uint8_t data[];
 };
 
@@ -407,7 +411,8 @@ struct mmpkt *__wrap_mmint_umac_ap_get_beacon(struct umac_data *umacd)
 /* Frames this file builds go to the chip as data, not management. */
 enum mmwlan_status __wrap_mmint_mmdrv_tx_frame(struct mmpkt *mmpkt, bool is_mgmt)
 {
-    if (mmpkt != NULL && mmpkt == s_data_pkt_in_flight)
+#define TX_AS_MGMT 0   /* bisect: leave our data frames on the management queue */
+    if (!TX_AS_MGMT && mmpkt != NULL && mmpkt == s_data_pkt_in_flight)
     {
         is_mgmt = false;
     }
@@ -424,7 +429,7 @@ static enum mmrc_bw channel_bw(void)
 
 void __wrap_mmint_umac_rc_init_rate_table_mgmt(struct umac_data *umacd, struct mmrc_rate_table *table, bool rts_required)
 {
-    if (!RATE_ADAPT || s_data_pkt_in_flight == NULL || s_tx_rssi_hint == INT16_MIN)
+    if (!RATE_ADAPT || s_data_pkt_in_flight == NULL || s_tx_rssi_hint == INT16_MIN || s_tx_small)
     {
         __real_mmint_umac_rc_init_rate_table_mgmt(umacd, table, rts_required);
         return;
@@ -708,8 +713,12 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
     mmpkt_close(&view);
 
     s_tx_rssi_hint = rssi_hint;
+    s_tx_small = len < SMALL_FRAME;
     s_data_pkt_in_flight = pkt;
+    int64_t t0 = esp_timer_get_time();
     enum mmwlan_status st = mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
+    uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
+    s_t_tx_us_sum += dt; s_t_tx_n++; if (dt > s_t_tx_us_max) s_t_tx_us_max = dt;
     s_data_pkt_in_flight = NULL;
     xSemaphoreGive(s_tx_lock);
     if (st != MMWLAN_SUCCESS)
@@ -826,6 +835,7 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
                     it->len = (uint16_t)len;
                     it->rssi = rssi;
                     it->kind = 0;
+                    it->t_rx_us = esp_timer_get_time();
                     memcpy(it->data, d, len);
                     if (xQueueSend(s_rx_queue, &it, 0) != pdTRUE)
                     {
@@ -1237,6 +1247,10 @@ static void mesh_task(void *arg)
             free(it);
             continue;
         }
+        {
+            uint32_t dq = (uint32_t)(esp_timer_get_time() - it->t_rx_us);
+            s_t_rxq_us_sum += dq; s_t_rxq_n++; if (dq > s_t_rxq_us_max) s_t_rxq_us_max = dq;
+        }
         const uint8_t *d = it->data;
         uint32_t len = it->len;
         const uint8_t *ra = &d[4], *ta = &d[10], *da = &d[16], *sa = &d[24];
@@ -1515,5 +1529,10 @@ void mesh_get_stats(struct mesh_stats *out)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_stats;
+    out->t_tx_avg_us = s_t_tx_n ? s_t_tx_us_sum / s_t_tx_n : 0;
+    out->t_tx_max_us = s_t_tx_us_max;
+    out->t_rxq_avg_us = s_t_rxq_n ? s_t_rxq_us_sum / s_t_rxq_n : 0;
+    out->t_rxq_max_us = s_t_rxq_us_max;
+    s_t_tx_us_sum = s_t_tx_n = s_t_tx_us_max = s_t_rxq_us_sum = s_t_rxq_n = s_t_rxq_us_max = 0;
     xSemaphoreGive(s_lock);
 }

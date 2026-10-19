@@ -59,8 +59,9 @@ you, do not flash it.
   at 8 dBm (the bench setting; the chip allows far more).
 - Relaying through a middle board is implemented but not yet tested (needs a third board
   out of range of the first).
-- Not implemented: 802.11s peering, HWMP path selection, encryption. The mesh is open and
-  uses flooding with a hop limit, duplicate suppression and routes learned from traffic.
+- Implemented now: 802.11s peering (open security). Not yet: the mesh password, HWMP path
+  selection. Routing is flooding with a hop limit, duplicate suppression and routes learned
+  from traffic.
 - Photos work and double as a speed test: a 300 KB photo crosses from one board to the
   other in 2.6 s, about 900 kbit/s on the desk at a 2 MHz channel, with rate selection by
   signal strength and 32 KB TCP windows. At the SDK's defaults it was 200 kbit/s. Chat and
@@ -131,10 +132,10 @@ the mesh instead of a station link, so XIAOs form an ATAK-capable net among them
 and join the Pi's mesh once steps 4 to 6 land. The work: a `uplink_mesh` module in the
 gateway that wraps `mesh.c`, a third node role next to its client and relay roles.
 
-**Step 4: 802.11s peering.** The real handshake with a neighbour: Mesh Peering Open, Confirm
-and Close with link ids, timers and retries. The frames already fly; the state machine does
-not exist yet. With this, a XIAO is a proper mesh point and could peer with a Linux mesh
-point that has security off.
+**Step 4: 802.11s peering. Done, open security.** Mesh Peering Open, Confirm and Close with
+link ids, timers and retries, in the mesh layer, with data gated on an established peering.
+Two XIAOs peer within a second of boot. Next proof: a Linux mesh point (the HaLowLink 1)
+accepting the XIAO as a peer, which is where the exact element contents get checked.
 
 **Step 5: the mesh password.** OpenMANET nodes encrypt the mesh: SAE authentication between
 peers, then the authenticated peering exchange, then per-neighbour keys loaded into the

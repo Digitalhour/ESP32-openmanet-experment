@@ -45,6 +45,17 @@ through a wrap on `mmint_mmdrv_host_process_rx_frame`: beacons with our Mesh ID 
 neighbour table, 4-address data frames go to the mesh task, everything else goes on to
 morselib as before.
 
+**Peering (802.11s Mesh Peering Management, open security).** Beacons carry the Mesh
+Configuration element (HWMP, airtime metric, no congestion control, neighbour offset sync,
+open authentication, accepting peerings). Hearing a matching beacon from a new neighbour
+starts a handshake after a short random delay: Mesh Peering Open with our link id, answered
+with Open plus Confirm; the state machine (IDLE, OPN_SNT, OPN_RCVD, CNF_RCVD, ESTAB, HOLDING)
+follows 802.11-2020 14.3.3, with the Open resent on a timer that doubles from 250 ms up to
+four times when a frame is lost, and Close on retry or confirm timeouts. Data frames from a
+neighbour that is not in ESTAB are dropped, routes only use ESTAB next hops, and a peer whose
+beacons stop for 45 s is closed. Two boards peer within a second of boot. `CHAT_MESH_PEERING`
+turns the requirement off (trust on sight), which is what the earlier builds did.
+
 Forwarding rules, in the mesh task:
 
 - Drop frames whose source is us (our own flood coming back) and frames already seen
@@ -145,8 +156,16 @@ TX power is a different knob: it buys range, not speed. The bench cap of 8 dBm k
 on one desk from overloading each other; in the field, raise it from the page.
 
 Multi-hop relaying is implemented but untested: it needs a third board placed out of range
-of the first. Mesh peering (the 802.11s handshake), path selection (HWMP) and encryption are
-not implemented; the mesh is open and uses flooding plus learned routes.
+of the first. The 802.11s peering handshake is implemented (open security); the mesh
+password (SAE and authenticated peering) and HWMP path selection are not. Routing is flooding
+plus learned routes.
+
+Open item: the ping round trip between two boards varies from 15 ms to 90 ms from one boot
+to the next, with beacon reception between 65 and 100 percent, while throughput stays
+around 800 to 900 kbit/s. The host side was measured clean (chip transmit call 0.3 ms,
+receive hand-off 30 µs), so the variation is in the chip or on the air; the likely cause is
+the two boards' beacon times landing close together after some boots, which a packet capture
+on a Linux HaLow node (the HaLowLink) will settle.
 
 ## Research behind it
 

@@ -70,6 +70,7 @@ struct mesh_stats
     uint32_t beacons_built, beacons_heard;
     uint32_t tx_by_mcs[8];      /* unicast frames sent at each starting MCS */
     uint32_t plink_open_tx, plink_confirm_tx, plink_close_tx, plink_rx, plink_established, plink_lost, rx_unpeered;
+    uint32_t t_tx_avg_us, t_tx_max_us, t_rxq_avg_us, t_rxq_max_us;   /* time in the chip transmit call; receive queue wait */
 };
 
 /* Boots the HaLow chip, starts the mesh interface and creates the network interface (not yet

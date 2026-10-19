@@ -151,6 +151,7 @@ static char s_seen_ids[MAX_SEEN_IDS][24];
 static size_t s_seen_next;
 static SemaphoreHandle_t s_lock;
 static int s_sock = -1;
+static volatile uint32_t s_api_calls, s_api_max_us, s_api_sum_us;
 static photo_t s_photos[MAX_PHOTOS];
 static size_t s_photo_next;
 static QueueHandle_t s_fetch_queue;
@@ -916,7 +917,6 @@ static void handle_packet(const char *data, size_t len, const char *from_ip)
                 s_peers[i].rtt_ms = (int32_t)((now - (int64_t)ts->valuedouble) / 1000);
                 s_peers[i].pongs++;
                 s_peers[i].last_seen_us = now;
-                if (s_peers[i].pongs <= 3 || s_peers[i].pongs % 6 == 0)
                 {
                     ESP_LOGI(TAG, "Ping to board %s over the mesh: %ld ms (%lu of %lu answered)", s_peers[i].node,
                              (long)s_peers[i].rtt_ms, (unsigned long)s_peers[i].pongs, (unsigned long)s_peers[i].pings);
@@ -1058,7 +1058,11 @@ static void halow_task(void *arg)
     cfg.spi_max_hz = CONFIG_CHAT_HALOW_SPI_MAX_HZ;
     cfg.reset_hold_ms = CONFIG_CHAT_HALOW_RESET_HOLD_MS;
     cfg.reset_settle_ms = CONFIG_CHAT_HALOW_RESET_SETTLE_MS;
-    cfg.require_peering = CONFIG_CHAT_MESH_PEERING;
+#ifdef CONFIG_CHAT_MESH_PEERING
+    cfg.require_peering = true;
+#else
+    cfg.require_peering = false;
+#endif
     if (mesh_start(&cfg) != ESP_OK)
     {
         ESP_LOGE(TAG, "Mesh failed to start; rebooting in 10 s");
@@ -1102,6 +1106,17 @@ static void halow_task(void *arg)
                  (unsigned long)ms.rx_delivered, (unsigned long)ms.rx_forwarded, (unsigned long)ms.rx_duplicates, (unsigned long)ms.rx_queue_full,
                  (unsigned long)ms.rx_unpeered, (unsigned long)ms.beacons_built, (unsigned long)ms.beacons_heard, (unsigned long)ms.plink_established,
                  (unsigned long)ms.plink_lost, nn, nn > 0 ? (nb[0].plink == MESH_PLINK_ESTAB ? " (peered)" : " (not peered)") : "");
+        ESP_LOGI(TAG, "  timing: chip tx call avg %lu us max %lu us | rx queue wait avg %lu us max %lu us | page polls %lu (avg %lu ms, max %lu ms) | %u messages stored",
+                 (unsigned long)ms.t_tx_avg_us, (unsigned long)ms.t_tx_max_us, (unsigned long)ms.t_rxq_avg_us, (unsigned long)ms.t_rxq_max_us,
+                 (unsigned long)s_api_calls, (unsigned long)(s_api_calls ? s_api_sum_us / s_api_calls / 1000 : 0), (unsigned long)(s_api_max_us / 1000),
+                 (unsigned)s_message_count);
+        s_api_calls = s_api_sum_us = s_api_max_us = 0;
+        for (int i = 0; i < nn; i++)
+        {
+            ESP_LOGI(TAG, "  neighbour %02x:%02x:%02x:%02x:%02x:%02x rssi %d, %s, heard %lld s ago", nb[i].addr[0], nb[i].addr[1],
+                     nb[i].addr[2], nb[i].addr[3], nb[i].addr[4], nb[i].addr[5], nb[i].rssi, mesh_plink_state_name(nb[i].plink),
+                     (long long)((esp_timer_get_time() - nb[i].last_seen_us) / 1000000));
+        }
     }
 }
 
@@ -1337,6 +1352,7 @@ static esp_err_t status_handler(httpd_req_t *req)
  * messages is a person reading them, so this is where read acks go out. */
 static esp_err_t messages_handler(httpd_req_t *req)
 {
+    int64_t t_api = esp_timer_get_time();
     uint32_t after = 0;
     char query[96], value[16], viewer[MAX_NAME + 1] = "";
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
@@ -1399,7 +1415,10 @@ static esp_err_t messages_handler(httpd_req_t *req)
     {
         send_read_ack(to_ack[i], viewer);
     }
-    return send_json(req, root);
+    esp_err_t r = send_json(req, root);
+    uint32_t dt = (uint32_t)(esp_timer_get_time() - t_api);
+    s_api_calls++; s_api_sum_us += dt; if (dt > s_api_max_us) s_api_max_us = dt;
+    return r;
 }
 
 /* POST /api/send {"name": "...", "text": "...", "ts": 1700000000000} */
