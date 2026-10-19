@@ -26,6 +26,7 @@
 
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "nvs.h"
 
@@ -54,7 +55,25 @@ static const char *TAG = "mesh";
 #define MESH_SCAN_MS 2048
 
 #define IE_SSID 0
+#define IE_MESH_CONFIG 113
 #define IE_MESH_ID 114
+#define IE_MESH_PEERING 117
+
+/* Mesh peering management: category 15 (self-protected), actions 1 open, 2 confirm, 3 close. */
+#define CAT_SELF_PROTECTED 15
+#define PLINK_OPEN 1
+#define PLINK_CONFIRM 2
+#define PLINK_CLOSE 3
+#define REASON_MESH_CLOSE_RCVD 55
+#define REASON_MESH_MAX_RETRIES 56
+#define REASON_MESH_CONFIRM_TIMEOUT 57
+#define REASON_MESH_PEERING_CANCELLED 52
+#define PLINK_RETRY_MS 250          /* doubles on each retry (mac80211 does the same from 40 ms) */
+#define PLINK_MAX_RETRIES 4
+#define PLINK_CONFIRM_MS 1000
+#define PLINK_HOLDING_MS 500
+#define PLINK_OPEN_DELAY_MS 300     /* plus up to 700 ms of jitter before we open to a new neighbour */
+#define PLINK_LOST_US (45 * 1000000LL) /* no beacon this long: the peer is gone */
 
 #define TTL_DEFAULT 8
 #define MAX_NEIGHBOURS 16
@@ -131,6 +150,10 @@ void __real_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
 enum mmwlan_status __real_mmint_mmdrv_tx_frame(struct mmpkt *mmpkt, bool is_mgmt);
 void __real_mmint_umac_rc_init_rate_table_mgmt(struct umac_data *umacd, struct mmrc_rate_table *table, bool rts_required);
 struct umac_data *mmint_umac_data_get_umacd(void);
+struct consbuf;
+typedef void (*mgmt_frame_builder_t)(struct umac_data *umacd, struct consbuf *buf, void *params);
+struct mmpkt *mmint_build_mgmt_frame(struct umac_data *umacd, mgmt_frame_builder_t builder, void *params);
+void mmint_consbuf_append(struct consbuf *buf, const uint8_t *data, uint32_t len);
 struct mmpkt *mmint_umac_datapath_alloc_raw_tx_mmpkt(uint8_t pkt_class, uint32_t space_at_start, uint32_t space_at_end);
 enum mmwlan_status mmint_umac_datapath_tx_mgmt_frame_ap(struct umac_data *umacd, struct mmpkt *txbuf,
                                                         struct mmrc_rate *rate_override);
@@ -152,6 +175,13 @@ static char s_fw_version[32];
 static const struct mmwlan_s1g_channel *s_channel;
 
 static struct mesh_neighbour s_neighbours[MAX_NEIGHBOURS];
+static struct
+{
+    int64_t timer_us;            /* 0: no timer running */
+    uint8_t retries;
+    uint32_t timeout_ms;
+    int64_t open_at_us;          /* when to send our first open to this neighbour, 0: not planned */
+} s_plink[MAX_NEIGHBOURS];
 static struct mesh_route s_routes[MAX_ROUTES];
 static struct
 {
@@ -166,11 +196,14 @@ static QueueHandle_t s_rx_queue;
 static struct mesh_stats s_stats;
 
 static const uint8_t BROADCAST[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+static void mesh_config_ie(uint8_t out[9]);
+static int neighbour_index(const uint8_t *addr);
 
 struct rx_item
 {
     uint16_t len;
     int16_t rssi;
+    uint8_t kind;                /* 0 data frame, 1 peering frame */
     uint8_t data[];
 };
 
@@ -348,6 +381,24 @@ struct mmpkt *__wrap_mmint_umac_ap_get_beacon(struct umac_data *umacd)
                 break;
             }
         }
+        /* A mesh beacon also carries the Mesh Configuration element; Linux will not treat us
+         * as a mesh neighbour without it. */
+        if (mmpkt_available_space_at_end(view) >= 9)
+        {
+            uint8_t conf[9];
+            mesh_config_ie(conf);
+            uint8_t *p = mmpkt_append(view, sizeof(conf));
+            memcpy(p, conf, sizeof(conf));
+        }
+        else
+        {
+            static bool warned;
+            if (!warned)
+            {
+                warned = true;
+                ESP_LOGW(TAG, "No room in the beacon for the Mesh Configuration element");
+            }
+        }
         mmpkt_close(&view);
     }
     return beacon;
@@ -400,6 +451,35 @@ void __wrap_mmint_umac_rc_init_rate_table_mgmt(struct umac_data *umacd, struct m
     }
 }
 
+static int peers_established(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_NEIGHBOURS; i++)
+    {
+        if (s_neighbours[i].beacons != 0 && s_neighbours[i].plink == MESH_PLINK_ESTAB)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Mesh Configuration element (802.11-2020 9.4.2.97): HWMP, airtime metric, no congestion
+ * control, neighbour offset sync, open authentication, formation info, capabilities. */
+static void mesh_config_ie(uint8_t out[9])
+{
+    int peers = peers_established();
+    out[0] = IE_MESH_CONFIG;
+    out[1] = 7;
+    out[2] = 1;   /* active path selection protocol: HWMP */
+    out[3] = 1;   /* path selection metric: airtime */
+    out[4] = 0;   /* congestion control: none */
+    out[5] = 1;   /* synchronisation: neighbour offset */
+    out[6] = 0;   /* authentication: none (open) */
+    out[7] = (uint8_t)((peers > 63 ? 63 : peers) << 1);                 /* formation info: peerings */
+    out[8] = (uint8_t)((peers < MAX_NEIGHBOURS ? 0x01 : 0) | 0x08);     /* accepting peerings, forwarding */
+}
+
 /* ---------- Tables ---------- */
 
 static void neighbour_heard(const uint8_t *addr, int16_t rssi)
@@ -433,7 +513,34 @@ static void neighbour_heard(const uint8_t *addr, int16_t rssi)
     slot->beacons++;
     slot->last_seen_us = now;
     s_stats.beacons_heard++;
+    int idx = (int)(slot - s_neighbours);
+    if (s_cfg.require_peering && slot->plink == MESH_PLINK_IDLE && s_plink[idx].open_at_us == 0)
+    {
+        s_plink[idx].open_at_us = now + (PLINK_OPEN_DELAY_MS + (esp_random() % 700)) * 1000LL;
+    }
     xSemaphoreGive(s_lock);
+}
+
+static int neighbour_index(const uint8_t *addr)
+{
+    for (int i = 0; i < MAX_NEIGHBOURS; i++)
+    {
+        if (s_neighbours[i].beacons != 0 && mac_eq(s_neighbours[i].addr, addr))
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool neighbour_is_peer(const uint8_t *addr)
+{
+    if (!s_cfg.require_peering)
+    {
+        return true;
+    }
+    int i = neighbour_index(addr);
+    return i >= 0 && s_neighbours[i].plink == MESH_PLINK_ESTAB;
 }
 
 static int16_t neighbour_rssi(const uint8_t *addr)
@@ -508,6 +615,14 @@ static bool route_lookup(const uint8_t *dst, uint8_t *next_hop)
         struct mesh_route *r = &s_routes[i];
         if (r->last_us != 0 && mac_eq(r->dst, dst) && now - r->last_us < ROUTE_TIMEOUT_US)
         {
+            if (s_cfg.require_peering)
+            {
+                int ni = neighbour_index(r->next_hop);
+                if (ni < 0 || s_neighbours[ni].plink != MESH_PLINK_ESTAB)
+                {
+                    break;   /* the next hop is not a peer: flood instead */
+                }
+            }
             memcpy(next_hop, r->next_hop, 6);
             found = true;
             break;
@@ -551,6 +666,7 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
     {
         return ESP_ERR_INVALID_STATE;
     }
+    int16_t rssi_hint = (ra[0] & 1) ? INT16_MIN : neighbour_rssi(ra);
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     struct mmpkt *pkt = mmint_umac_datapath_alloc_raw_tx_mmpkt(PKT_CLASS_DATA_TID0, 0, len);
     if (pkt == NULL)
@@ -591,7 +707,7 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
     memcpy(&p[46], payload, payload_len);
     mmpkt_close(&view);
 
-    s_tx_rssi_hint = (ra[0] & 1) ? INT16_MIN : neighbour_rssi(ra);
+    s_tx_rssi_hint = rssi_hint;
     s_data_pkt_in_flight = pkt;
     enum mmwlan_status st = mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
     s_data_pkt_in_flight = NULL;
@@ -691,13 +807,25 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
         else if (ftype == 2 && (d[1] & 0x03) == 0x03 && len >= HDR_LEN)
         {
             consumed = true;
-            if (!mac_eq(&d[24], s_addr))   /* our own frame relayed back to us */
+            bool peer_ok = true;
+            if (s_cfg.require_peering)
+            {
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                peer_ok = neighbour_is_peer(&d[10]);
+                xSemaphoreGive(s_lock);
+            }
+            if (!peer_ok)
+            {
+                s_stats.rx_unpeered++;
+            }
+            else if (!mac_eq(&d[24], s_addr))   /* our own frame relayed back to us */
             {
                 struct rx_item *it = malloc(sizeof(*it) + len);
                 if (it != NULL)
                 {
                     it->len = (uint16_t)len;
                     it->rssi = rssi;
+                    it->kind = 0;
                     memcpy(it->data, d, len);
                     if (xQueueSend(s_rx_queue, &it, 0) != pdTRUE)
                     {
@@ -707,9 +835,22 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
                 }
             }
         }
-        else if (ftype == 0 && subtype == 13 && len >= 26 && d[24] == 15)
+        else if (ftype == 0 && subtype == 13 && len >= 26 && d[24] == CAT_SELF_PROTECTED)
         {
-            consumed = true;   /* mesh peering frames: nothing to do with them yet */
+            consumed = true;   /* a mesh peering frame: handled by the mesh task */
+            struct rx_item *it = malloc(sizeof(*it) + len);
+            if (it != NULL)
+            {
+                it->len = (uint16_t)len;
+                it->rssi = rssi;
+                it->kind = 1;
+                memcpy(it->data, d, len);
+                if (xQueueSend(s_rx_queue, &it, 0) != pdTRUE)
+                {
+                    free(it);
+                    s_stats.rx_queue_full++;
+                }
+            }
         }
     }
     mmpkt_close(&view);
@@ -721,14 +862,379 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
     __real_mmint_mmdrv_host_process_rx_frame(rxbuf, channel);
 }
 
+/* ---------- 802.11s peering (Mesh Peering Management, open security) ---------- */
+
+const char *mesh_plink_state_name(enum mesh_plink_state st)
+{
+    switch (st)
+    {
+        case MESH_PLINK_IDLE: return "idle";
+        case MESH_PLINK_OPN_SNT: return "open sent";
+        case MESH_PLINK_CNF_RCVD: return "confirm received";
+        case MESH_PLINK_OPN_RCVD: return "open received";
+        case MESH_PLINK_ESTAB: return "peered";
+        case MESH_PLINK_HOLDING: return "closing";
+        default: return "?";
+    }
+}
+
+struct plink_frame_params
+{
+    uint8_t to[6];
+    uint8_t action;
+    uint16_t llid, plid, reason, aid;
+};
+
+static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void *params)
+{
+    (void)umacd;
+    const struct plink_frame_params *f = (const struct plink_frame_params *)params;
+    uint8_t hdr[24] = { 0 };
+    hdr[0] = 0xd0;                                    /* management, action */
+    memcpy(&hdr[4], f->to, 6);
+    memcpy(&hdr[10], s_addr, 6);
+    memcpy(&hdr[16], s_addr, 6);                      /* address 3: us (mesh peering frames) */
+    mmint_consbuf_append(buf, hdr, sizeof(hdr));
+
+    uint8_t fixed[6] = { CAT_SELF_PROTECTED, f->action, 0, 0, 0, 0 };
+    size_t fixed_len = 2;
+    if (f->action == PLINK_OPEN)
+    {
+        fixed_len = 4;                                /* capability */
+    }
+    else if (f->action == PLINK_CONFIRM)
+    {
+        fixed[4] = (uint8_t)f->aid;                   /* capability, then AID */
+        fixed[5] = (uint8_t)(f->aid >> 8);
+        fixed_len = 6;
+    }
+    mmint_consbuf_append(buf, fixed, fixed_len);
+
+    uint8_t mesh_id[2 + MESH_ID_MAX];
+    mesh_id[0] = IE_MESH_ID;
+    mesh_id[1] = (uint8_t)strlen(s_cfg.mesh_id);
+    memcpy(&mesh_id[2], s_cfg.mesh_id, mesh_id[1]);
+    mmint_consbuf_append(buf, mesh_id, 2 + mesh_id[1]);
+
+    if (f->action != PLINK_CLOSE)
+    {
+        uint8_t conf[9];
+        mesh_config_ie(conf);
+        mmint_consbuf_append(buf, conf, sizeof(conf));
+    }
+
+    uint8_t mpm[2 + 8] = { IE_MESH_PEERING, 4, 0, 0, (uint8_t)f->llid, (uint8_t)(f->llid >> 8) };
+    size_t mpm_len = 6;
+    if (f->action != PLINK_OPEN)
+    {
+        mpm[6] = (uint8_t)f->plid;
+        mpm[7] = (uint8_t)(f->plid >> 8);
+        mpm[1] = 6;
+        mpm_len = 8;
+    }
+    if (f->action == PLINK_CLOSE)
+    {
+        mpm[8] = (uint8_t)f->reason;
+        mpm[9] = (uint8_t)(f->reason >> 8);
+        mpm[1] = 8;
+        mpm_len = 10;
+    }
+    mmint_consbuf_append(buf, mpm, mpm_len);
+}
+
+/* Caller holds s_lock. */
+static void plink_send(int ni, uint8_t action, uint16_t reason)
+{
+    struct mesh_neighbour *n = &s_neighbours[ni];
+    struct plink_frame_params f = { .action = action, .llid = n->llid, .plid = n->plid, .reason = reason, .aid = (uint16_t)(ni + 1) };
+    memcpy(f.to, n->addr, 6);
+    struct mmpkt *pkt = mmint_build_mgmt_frame(s_umacd, build_plink_frame, &f);
+    if (pkt == NULL)
+    {
+        return;
+    }
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    s_tx_rssi_hint = INT16_MIN;   /* management rate */
+    enum mmwlan_status st = mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
+    xSemaphoreGive(s_tx_lock);
+    if (st == MMWLAN_SUCCESS)
+    {
+        if (action == PLINK_OPEN) s_stats.plink_open_tx++;
+        else if (action == PLINK_CONFIRM) s_stats.plink_confirm_tx++;
+        else s_stats.plink_close_tx++;
+    }
+}
+
+static void plink_set_timer(int ni, uint32_t ms)
+{
+    s_plink[ni].timeout_ms = ms;
+    s_plink[ni].timer_us = esp_timer_get_time() + (int64_t)ms * 1000;
+}
+
+static void plink_log(int ni, const char *what)
+{
+    char a[18];
+    mac_str(s_neighbours[ni].addr, a);
+    ESP_LOGI(TAG, "Peering %s: %s (%s)", a, what, mesh_plink_state_name(s_neighbours[ni].plink));
+}
+
+static void plink_to_holding(int ni, uint16_t reason)
+{
+    plink_send(ni, PLINK_CLOSE, reason);
+    if (s_neighbours[ni].plink == MESH_PLINK_ESTAB)
+    {
+        s_stats.plink_lost++;
+    }
+    s_neighbours[ni].plink = MESH_PLINK_HOLDING;
+    plink_set_timer(ni, PLINK_HOLDING_MS);
+    plink_log(ni, "closing");
+}
+
+static void plink_established(int ni)
+{
+    s_neighbours[ni].plink = MESH_PLINK_ESTAB;
+    s_plink[ni].timer_us = 0;
+    s_stats.plink_established++;
+    plink_log(ni, "PEERED");
+}
+
+/* Our side starts a peering: send Open, wait for their Open and Confirm. */
+static void plink_open(int ni)
+{
+    struct mesh_neighbour *n = &s_neighbours[ni];
+    n->llid = (uint16_t)(esp_random() & 0xffff);
+    if (n->llid == 0) n->llid = 1;
+    n->plid = 0;
+    n->plink = MESH_PLINK_OPN_SNT;
+    s_plink[ni].retries = 0;
+    plink_send(ni, PLINK_OPEN, 0);
+    plink_set_timer(ni, PLINK_RETRY_MS);
+    plink_log(ni, "open sent");
+}
+
+/* A peering frame from a neighbour (the state machine of 802.11-2020 14.3.3). */
+static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
+{
+    const uint8_t *src = &frame[10];
+    uint8_t action = frame[25];
+    size_t body_at = 26;
+    if (action == PLINK_OPEN) body_at += 2;                 /* capability */
+    else if (action == PLINK_CONFIRM) body_at += 4;         /* capability, AID */
+    else if (action != PLINK_CLOSE) return;
+    if (len < body_at) return;
+
+    bool mesh_id_ok = false, conf_ok = action == PLINK_CLOSE;
+    uint16_t llid = 0, plid = 0, reason = 0;
+    bool have_mpm = false;
+    size_t i = body_at;
+    while (i + 2 <= len)
+    {
+        uint8_t id = frame[i], l = frame[i + 1];
+        if (i + 2 + l > len) break;
+        const uint8_t *v = &frame[i + 2];
+        if (id == IE_MESH_ID && l == strlen(s_cfg.mesh_id) && memcmp(v, s_cfg.mesh_id, l) == 0)
+        {
+            mesh_id_ok = true;
+        }
+        else if (id == IE_MESH_CONFIG && l == 7)
+        {
+            conf_ok = v[0] == 1 && v[1] == 1 && v[2] == 0 && v[3] == 1 && v[4] == 0;   /* same mesh profile, open */
+        }
+        else if (id == IE_MESH_PEERING && l >= 4)
+        {
+            have_mpm = true;
+            llid = (uint16_t)(v[2] | (v[3] << 8));
+            if (l >= 6) plid = (uint16_t)(v[4] | (v[5] << 8));
+            if (l >= 8) reason = (uint16_t)(v[6] | (v[7] << 8));
+        }
+        i += 2 + l;
+    }
+    if (!have_mpm || !mesh_id_ok || !conf_ok)
+    {
+        char a[18];
+        mac_str(src, a);
+        ESP_LOGW(TAG, "Peering frame from %s ignored (action %u, mesh id %s, config %s, mpm %s)", a, action,
+                 mesh_id_ok ? "ok" : "no", conf_ok ? "ok" : "no", have_mpm ? "ok" : "no");
+        return;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_stats.plink_rx++;
+    int ni = neighbour_index(src);
+    if (ni < 0)
+    {
+        /* They opened before we heard a beacon: take them on anyway. */
+        xSemaphoreGive(s_lock);
+        neighbour_heard(src, rssi);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        ni = neighbour_index(src);
+        if (ni < 0)
+        {
+            xSemaphoreGive(s_lock);
+            return;
+        }
+    }
+    struct mesh_neighbour *n = &s_neighbours[ni];
+    s_plink[ni].open_at_us = 0;
+    switch (action)
+    {
+        case PLINK_OPEN:
+            switch (n->plink)
+            {
+                case MESH_PLINK_IDLE:
+                case MESH_PLINK_HOLDING:
+                    n->llid = (uint16_t)(esp_random() & 0xffff);
+                    if (n->llid == 0) n->llid = 1;
+                    n->plid = llid;
+                    n->plink = MESH_PLINK_OPN_RCVD;
+                    s_plink[ni].retries = 0;
+                    plink_send(ni, PLINK_OPEN, 0);
+                    plink_send(ni, PLINK_CONFIRM, 0);
+                    plink_set_timer(ni, PLINK_RETRY_MS);
+                    plink_log(ni, "open received, answered");
+                    break;
+                case MESH_PLINK_OPN_SNT:
+                    n->plid = llid;
+                    n->plink = MESH_PLINK_OPN_RCVD;
+                    plink_send(ni, PLINK_CONFIRM, 0);
+                    plink_set_timer(ni, PLINK_RETRY_MS);
+                    plink_log(ni, "open received after ours");
+                    break;
+                case MESH_PLINK_OPN_RCVD:
+                    if (n->plid == llid) plink_send(ni, PLINK_CONFIRM, 0);
+                    break;
+                case MESH_PLINK_CNF_RCVD:
+                    if (n->plid == 0 || n->plid == llid)
+                    {
+                        n->plid = llid;
+                        plink_send(ni, PLINK_CONFIRM, 0);
+                        plink_established(ni);
+                    }
+                    break;
+                case MESH_PLINK_ESTAB:
+                    if (n->plid == llid) plink_send(ni, PLINK_CONFIRM, 0);
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case PLINK_CONFIRM:
+            if (plid != n->llid)
+            {
+                break;   /* not about our link */
+            }
+            switch (n->plink)
+            {
+                case MESH_PLINK_OPN_SNT:
+                    n->plid = llid;
+                    n->plink = MESH_PLINK_CNF_RCVD;
+                    plink_set_timer(ni, PLINK_CONFIRM_MS);
+                    plink_log(ni, "confirm received");
+                    break;
+                case MESH_PLINK_OPN_RCVD:
+                    if (n->plid == llid) plink_established(ni);
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case PLINK_CLOSE:
+            if (n->plink != MESH_PLINK_IDLE && n->plink != MESH_PLINK_HOLDING)
+            {
+                char a[18];
+                mac_str(src, a);
+                ESP_LOGI(TAG, "Peering %s: close received (reason %u)", a, reason);
+                plink_to_holding(ni, REASON_MESH_CLOSE_RCVD);
+            }
+            else if (n->plink == MESH_PLINK_HOLDING)
+            {
+                n->plink = MESH_PLINK_IDLE;
+                s_plink[ni].timer_us = 0;
+            }
+            break;
+        default:
+            break;
+    }
+    xSemaphoreGive(s_lock);
+}
+
+/* Timers and planned opens; called from the mesh task every 50 ms. */
+static void plink_housekeeping(void)
+{
+    int64_t now = esp_timer_get_time();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int ni = 0; ni < MAX_NEIGHBOURS; ni++)
+    {
+        struct mesh_neighbour *n = &s_neighbours[ni];
+        if (n->beacons == 0)
+        {
+            continue;
+        }
+        if (n->plink == MESH_PLINK_ESTAB && now - n->last_seen_us > PLINK_LOST_US)
+        {
+            plink_log(ni, "no beacons, dropping the peering");
+            plink_to_holding(ni, REASON_MESH_PEERING_CANCELLED);
+            continue;
+        }
+        if (s_cfg.require_peering && n->plink == MESH_PLINK_IDLE && s_plink[ni].open_at_us != 0 && now >= s_plink[ni].open_at_us)
+        {
+            s_plink[ni].open_at_us = 0;
+            plink_open(ni);
+            continue;
+        }
+        if (s_plink[ni].timer_us == 0 || now < s_plink[ni].timer_us)
+        {
+            continue;
+        }
+        s_plink[ni].timer_us = 0;
+        switch (n->plink)
+        {
+            case MESH_PLINK_OPN_SNT:
+            case MESH_PLINK_OPN_RCVD:
+                /* Our Open or their Confirm may have been lost: send the Open again, which
+                 * makes a peer in any state answer with a Confirm. */
+                if (s_plink[ni].retries < PLINK_MAX_RETRIES)
+                {
+                    s_plink[ni].retries++;
+                    plink_send(ni, PLINK_OPEN, 0);
+                    plink_set_timer(ni, s_plink[ni].timeout_ms * 2);
+                }
+                else
+                {
+                    plink_to_holding(ni, REASON_MESH_MAX_RETRIES);
+                }
+                break;
+            case MESH_PLINK_CNF_RCVD:
+                plink_to_holding(ni, REASON_MESH_CONFIRM_TIMEOUT);
+                break;
+            case MESH_PLINK_HOLDING:
+                n->plink = MESH_PLINK_IDLE;
+                n->llid = n->plid = 0;
+                /* Try again later if its beacons keep coming. */
+                s_plink[ni].open_at_us = now + (5000 + (esp_random() % 3000)) * 1000LL;
+                break;
+            default:
+                break;
+        }
+    }
+    xSemaphoreGive(s_lock);
+}
+
 static void mesh_task(void *arg)
 {
     (void)arg;
     for (;;)
     {
         struct rx_item *it = NULL;
-        if (xQueueReceive(s_rx_queue, &it, portMAX_DELAY) != pdTRUE || it == NULL)
+        if (xQueueReceive(s_rx_queue, &it, pdMS_TO_TICKS(50)) != pdTRUE || it == NULL)
         {
+            plink_housekeeping();
+            continue;
+        }
+        if (it->kind == 1)
+        {
+            plink_process(it->data, it->len, it->rssi);
+            free(it);
             continue;
         }
         const uint8_t *d = it->data;

@@ -603,6 +603,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                  nb[i].addr[3], nb[i].addr[4], nb[i].addr[5]);
         cJSON_AddStringToObject(n, "addr", addr);
         cJSON_AddNumberToObject(n, "rssi", nb[i].rssi);
+        cJSON_AddStringToObject(n, "peering", mesh_plink_state_name(nb[i].plink));
         cJSON_AddItemToArray(neighbours, n);
     }
     struct mesh_route rt[32];

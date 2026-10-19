@@ -155,7 +155,8 @@ async function status() {
     myNode = s.node;
     $("node").textContent = "· " + s.node;
     const nbs = s.neighbours || [];
-    $("state").textContent = s.halow === "up" ? (nbs.length ? "mesh · " + nbs.length + " near" : "mesh · alone") : "starting";
+    const peered = nbs.filter(n => n.peered).length;
+    $("state").textContent = s.halow === "up" ? (nbs.length ? "mesh · " + peered + " of " + nbs.length + " peered" : "mesh · alone") : "starting";
     $("state").className = "pill " + (s.halow === "up" ? (nbs.length ? "up" : "wait") : "wait");
     $("sub").textContent = `${s.name} · mesh "${s.mesh_id}" · ${s.freq_mhz ? s.freq_mhz.toFixed(1) + " MHz" : ""}` +
       ` · TX cap ${s.tx_dbm || "max"} dBm`;
@@ -178,7 +179,7 @@ async function status() {
     for (const n of nbs) {
       const d = document.createElement("div");
       d.className = n.last_seen_s < 10 ? "peer-on" : "peer-off";
-      d.textContent = `radio ${n.addr} · ${n.rssi} dBm · heard ${n.last_seen_s} s ago`;
+      d.textContent = `radio ${n.addr} · ${n.rssi} dBm · heard ${n.last_seen_s} s ago · ${n.peering}`;
       radio.appendChild(d);
     }
     const m = s.mesh || {};

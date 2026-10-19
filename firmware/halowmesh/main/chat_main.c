@@ -1058,6 +1058,7 @@ static void halow_task(void *arg)
     cfg.spi_max_hz = CONFIG_CHAT_HALOW_SPI_MAX_HZ;
     cfg.reset_hold_ms = CONFIG_CHAT_HALOW_RESET_HOLD_MS;
     cfg.reset_settle_ms = CONFIG_CHAT_HALOW_RESET_SETTLE_MS;
+    cfg.require_peering = CONFIG_CHAT_MESH_PEERING;
     if (mesh_start(&cfg) != ESP_OK)
     {
         ESP_LOGE(TAG, "Mesh failed to start; rebooting in 10 s");
@@ -1089,7 +1090,19 @@ static void halow_task(void *arg)
     xEventGroupSetBits(s_events, CONNECTED_BIT);
     esp_ip4_addr_t ip = { .addr = s_halow_ip };
     ESP_LOGI(TAG, "Mesh address " IPSTR, IP2STR(&ip));
-    vTaskDelete(NULL);
+    for (;;)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        struct mesh_stats ms;
+        mesh_get_stats(&ms);
+        struct mesh_neighbour nb[4];
+        int nn = mesh_get_neighbours(nb, 4);
+        ESP_LOGI(TAG, "mesh: tx %lu (failed %lu, flooded %lu) rx %lu delivered %lu relayed %lu dup %lu qfull %lu unpeered %lu | beacons built %lu heard %lu | peerings %lu lost %lu | neighbours %d%s",
+                 (unsigned long)ms.tx_frames, (unsigned long)ms.tx_failed, (unsigned long)ms.tx_flooded, (unsigned long)ms.rx_frames,
+                 (unsigned long)ms.rx_delivered, (unsigned long)ms.rx_forwarded, (unsigned long)ms.rx_duplicates, (unsigned long)ms.rx_queue_full,
+                 (unsigned long)ms.rx_unpeered, (unsigned long)ms.beacons_built, (unsigned long)ms.beacons_heard, (unsigned long)ms.plink_established,
+                 (unsigned long)ms.plink_lost, nn, nn > 0 ? (nb[0].plink == MESH_PLINK_ESTAB ? " (peered)" : " (not peered)") : "");
+    }
 }
 
 /* ---------- Phone hotspot ---------- */
@@ -1255,6 +1268,8 @@ static esp_err_t status_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(n, "rssi", nb[i].rssi);
         cJSON_AddNumberToObject(n, "beacons", nb[i].beacons);
         cJSON_AddNumberToObject(n, "last_seen_s", (double)((t_now - nb[i].last_seen_us) / 1000000));
+        cJSON_AddStringToObject(n, "peering", mesh_plink_state_name(nb[i].plink));
+        cJSON_AddBoolToObject(n, "peered", nb[i].plink == MESH_PLINK_ESTAB);
         cJSON_AddItemToArray(neighbours, n);
     }
     cJSON *routes = cJSON_AddArrayToObject(root, "routes");
@@ -1284,6 +1299,9 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(stats, "queue_full", ms.rx_queue_full);
     cJSON_AddNumberToObject(stats, "beacons_built", ms.beacons_built);
     cJSON_AddNumberToObject(stats, "beacons_heard", ms.beacons_heard);
+    cJSON_AddNumberToObject(stats, "peerings", ms.plink_established);
+    cJSON_AddNumberToObject(stats, "peerings_lost", ms.plink_lost);
+    cJSON_AddNumberToObject(stats, "rx_unpeered", ms.rx_unpeered);
     cJSON_AddNumberToObject(root, "tx_dbm", s_tx_dbm);
     cJSON_AddNumberToObject(root, "boots", s_boot_count);
     cJSON *resets = cJSON_AddArrayToObject(root, "resets");

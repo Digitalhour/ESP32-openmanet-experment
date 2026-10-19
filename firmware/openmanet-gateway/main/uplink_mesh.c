@@ -37,6 +37,7 @@ static void mesh_bringup_task(void *arg)
     cfg.spi_max_hz = CONFIG_GW_MESH_SPI_MAX_HZ;
     cfg.reset_hold_ms = CONFIG_GW_MESH_RESET_HOLD_MS;
     cfg.reset_settle_ms = CONFIG_GW_MESH_RESET_SETTLE_MS;
+    cfg.require_peering = true;
     if (mesh_start(&cfg) != ESP_OK)
     {
         ESP_LOGE(TAG, "mesh failed to start; the node keeps its SoftAP and config UI");

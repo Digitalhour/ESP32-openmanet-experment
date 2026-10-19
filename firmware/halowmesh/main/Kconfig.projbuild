@@ -35,6 +35,14 @@ menu "HalowChat mesh"
         range 1 31
         default 8
 
+    config CHAT_MESH_PEERING
+        bool "Require the 802.11s peering handshake before exchanging data"
+        default y
+        help
+            Boards do the Mesh Peering Open/Confirm exchange and only pass data with
+            neighbours that completed it, the way Linux mesh points do. Off means any
+            board with the same mesh name is trusted on sight.
+
     config CHAT_WIFI_PSK
         string "Phone hotspot password (WPA2, 8+ characters)"
         default "halowchat"

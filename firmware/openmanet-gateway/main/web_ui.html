@@ -1539,7 +1539,7 @@ async function loadStatus() {
       el('stMeshNeighbours').textContent = nbs.length;
       el('stMeshRoutes').textContent = (typeof m.routes === 'number') ? m.routes : '\u2014';
       el('stMeshFrames').textContent = 'tx ' + (m.tx || 0) + ' / rx ' + (m.rx || 0) + ' / relayed ' + (m.forwarded || 0);
-      el('stMeshList').textContent = nbs.map(function(n) { return n.addr + ' (' + n.rssi + ' dBm)'; }).join(', ') || 'no neighbours heard yet';
+      el('stMeshList').textContent = nbs.map(function(n) { return n.addr + ' (' + n.rssi + ' dBm, ' + (n.peering || '') + ')'; }).join(', ') || 'no neighbours heard yet';
     }
 
     if (isRelay) {

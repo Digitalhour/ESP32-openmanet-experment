@@ -25,10 +25,22 @@ struct mesh_config
     uint8_t opclass;    /* global operating class, e.g. 69 (2 MHz) */
     uint8_t tx_dbm;     /* cap, 0 = regulatory maximum */
     uint8_t ttl;        /* hop limit for frames this board sends */
+    bool require_peering; /* only exchange data with neighbours the 802.11s peering handshake accepted */
     /* Board bring-up knobs, 0 = the values proven on the XIAO + Wio-WM6180 bench. */
     uint32_t spi_max_hz;      /* cap on the SPI clock to the chip (40 MHz) */
     uint16_t reset_hold_ms;   /* how long the chip is held in reset (8000) */
     uint16_t reset_settle_ms; /* chip boot time after reset (250) */
+};
+
+/* 802.11s peer link states (802.11-2020 14.3.3). Data flows only with ESTAB peers. */
+enum mesh_plink_state
+{
+    MESH_PLINK_IDLE = 0,
+    MESH_PLINK_OPN_SNT,
+    MESH_PLINK_CNF_RCVD,
+    MESH_PLINK_OPN_RCVD,
+    MESH_PLINK_ESTAB,
+    MESH_PLINK_HOLDING,
 };
 
 struct mesh_neighbour
@@ -37,7 +49,11 @@ struct mesh_neighbour
     int16_t rssi;
     uint32_t beacons;
     int64_t last_seen_us;
+    enum mesh_plink_state plink;
+    uint16_t llid, plid;         /* our and their link ids */
 };
+
+const char *mesh_plink_state_name(enum mesh_plink_state s);
 
 struct mesh_route
 {
@@ -53,6 +69,7 @@ struct mesh_stats
     uint32_t rx_frames, rx_delivered, rx_forwarded, rx_duplicates, rx_queue_full;
     uint32_t beacons_built, beacons_heard;
     uint32_t tx_by_mcs[8];      /* unicast frames sent at each starting MCS */
+    uint32_t plink_open_tx, plink_confirm_tx, plink_close_tx, plink_rx, plink_established, plink_lost, rx_unpeered;
 };
 
 /* Boots the HaLow chip, starts the mesh interface and creates the network interface (not yet
