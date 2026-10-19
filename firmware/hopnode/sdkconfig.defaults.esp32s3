@@ -1,0 +1,19 @@
+# Seeed XIAO ESP32S3 + Seeed XIAO Wi-Fi HaLow module (MM6108).
+# Pin map copied from esp-halow configs/sdkconfig.defaults.seeed_xiao_esp32s3-seeed_xiao_mm6108.
+
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Logs over the XIAO's USB-C port
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+CONFIG_MM_RESET_N=1
+CONFIG_MM_WAKE=2
+CONFIG_MM_BUSY=5
+CONFIG_MM_SPI_SCK=7
+CONFIG_MM_SPI_MOSI=9
+CONFIG_MM_SPI_MISO=8
+CONFIG_MM_SPI_CS=4
+CONFIG_MM_SPI_IRQ=3
+
+CONFIG_MM_BCF_FILE="bcf_fgh100mhaamd.bin"
+CONFIG_MM_CHIP_MM6108=y
