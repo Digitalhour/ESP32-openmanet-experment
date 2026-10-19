@@ -1,16 +1,37 @@
-# HalowChat
+# ESP32 HaLow hop nodes for OpenMANET
 
-Hubless group chat over Wi-Fi HaLow (802.11ah, 915 MHz) on cheap boards: Seeed XIAO ESP32S3
-plus the Seeed Wio-WM6180 HaLow module (Morse Micro MM6108). Every board runs the same
-firmware, gives a phone a Wi-Fi hotspot and a chat page, and relays messages for the other
-boards over a HaLow mesh. No access point, no pairing, no Linux box.
+Cheap, disposable relays for a Wi-Fi HaLow mesh (802.11ah, 915 MHz), built on a Seeed XIAO
+ESP32-S3 and the Seeed Wi-Fi HaLow module for XIAO (Morse Micro MM6108). About 22 dollars of
+boards. The aim: put one high up, in a tree, on a pole, on a roof, wherever an OpenMANET mesh
+needs another hop, and not care much if it is lost or forgotten. Phones, ATAK and the heavy
+work stay on the Raspberry Pi nodes; these extend the reach.
 
-The part that did not exist before: an 802.11s-style mesh on the MM6108 from a
-microcontroller. Morse Micro's SDK offers station and access point only, and Morse has said
-mesh is not supported on their microcontroller offering. The chip can do it (Linux does), and
-this repository shows the recipe for the ESP32 side: three small hooks into the SDK and one
-extra chip command. See `firmware/halowmesh/README.md` for how it works and
-`firmware/mesh-probe/README.md` for the experiments that found it.
+Two things in this repository did not exist before:
+
+- **An 802.11s-style mesh on the MM6108 from a microcontroller.** Morse Micro's SDK offers
+  station and access point only, and Morse has said mesh is not supported on their
+  microcontroller offering. The chip does it (that is what Linux runs), and the ESP32 side
+  turned out to be three small hooks into the SDK and one extra chip command, all on the
+  stock chip firmware. Beacons with a Mesh ID, the peering handshake, 4-address data frames.
+- **batman-adv (BATMAN_V), the routing OpenMANET uses, running on an ESP32.** Reimplemented
+  from the Linux kernel source. A Linux batman-adv node sees it as a peer: neighbour,
+  originator, translation table, pings at every packet size. It runs over the HaLow mesh link
+  between XIAOs.
+
+`firmware/hopnode` is those two layers and nothing else: the hop node.
+
+## What works today (2026-10-19)
+
+| | Result |
+|---|---|
+| Mesh interface, Mesh ID beacons, 4-address data on the chip | works, stock chip firmware |
+| 802.11s peering (Open, Confirm, Close, retries), data gated on it | works, two XIAOs peer in about 1 s |
+| batman-adv against a Linux batman-adv node, over 2.4 GHz Wi-Fi | seen, routed, translated; pings 20 of 20, full-size and 8000-byte pings pass |
+| batman-adv between two XIAOs over HaLow | both route each other, bat0 pings across the mesh |
+| Chat with photos over the XIAO mesh (no batman) | 245 ft through an aluminium-sided wall at 8 dBm; 300 KB photo in 2.6 s |
+| Will Shields' OpenMANET gateway (hotspot, NAT, ATAK CoT relay) on the mesh | both boards come up as mesh nodes, NAT on, CoT group joined; untested with ATAK itself |
+| The mesh password (SAE) a real OpenMANET net requires | not yet |
+| Relaying through a middle node | implemented, needs a third board to prove |
 
 ## Who made this, and a warning
 
@@ -18,7 +39,7 @@ I am a PHP and Python developer. I know very little about the ESP32, ESP-IDF, or
 Micro SDK. This project was built with Claude Fable 5.1 (Anthropic's AI model) doing the
 research, the firmware code and most of the documentation, while I ran the hardware, tested,
 and decided what to build next. Read the code with that in mind: it works on my two boards,
-on my desk, and that is the extent of the testing so far.
+on my desk and across my house, and that is the extent of the testing so far.
 
 Use at your own risk. This software is provided as is, with no warranty of any kind. I am
 not responsible for any damage, loss, or regulatory trouble that may come from using it.
@@ -27,14 +48,11 @@ In particular: it drives a radio transmitter, so check your local rules for the 
 vendor does not support, and it can reset or crash the chip and the board. If that worries
 you, do not flash it.
 
-## What this is for
+## The idea: cheap, disposable hop nodes
 
-Cheap, disposable hop nodes. At Seeed's prices as of October 2026 the two boards come to
-about 22 dollars: the Wi-Fi HaLow transceiver for XIAO at 14.90 and the XIAO ESP32-S3 at
-7.49. The idea is to put them high up, in a tree, on a pole, on a roof, wherever a mesh needs
-another hop, and not care much if one is lost or forgotten. Each one relays for the whole mesh.
-Phones, ATAK and the heavy work stay on the Pi nodes; the XIAOs extend the reach.
-`firmware/hopnode` is that node: the HaLow mesh link plus batman-adv and nothing else.
+At Seeed's prices as of October 2026 the two boards come to about 22 dollars: the Wi-Fi HaLow
+transceiver for XIAO at 14.90 and the XIAO ESP32-S3 at 7.49. Add a battery and a box. Each
+node relays for the whole mesh and announces itself the way every other OpenMANET node does.
 
 **Build your own, cheaper.** Nothing here is tied to the XIAO. It is plain ESP-IDF plus Morse
 Micro's `morsemicro/halow` component, which Morse tests on the ESP32-C3, C6 and C5 as well as
@@ -43,151 +61,122 @@ the HaLow module on a small carrier board with a battery connector is a relay fo
 20 dollars; the only firmware change is the pin map in `sdkconfig.defaults`. If you make one,
 tell us what you built.
 
-## Layout
+## The firmwares
 
 | Directory | What |
 |---|---|
-| `firmware/halowmesh` | The mesh chat firmware. This is the one to flash. |
-| `firmware/mesh-probe` | The experiments: interface types, mesh beacons, over-the-air checks, peering frames, 4-address data. Each one documented with its result. |
-| `firmware/halowchat` | The earlier hub version (one board is a HaLow access point, the rest join). Works, kept as a fallback. |
-| `firmware/hopnode` | The hop node: 802.11s mesh link with peering plus batman-adv (BATMAN_V), no hotspot, no page. Two of them peer and route over HaLow and ping each other across bat0. The disposable relay. |
-| `firmware/batman-probe` | batman-adv (BATMAN_V) for the ESP32, tested against Linux batman-adv over Wi-Fi. The piece that will let a XIAO be an OpenMANET node once the HaLow link can carry it. |
-| `firmware/openmanet-gateway` | Will Shields' OpenMANET-XIAO-Gateway, imported with its full history (GPL-3.0). The XIAO as an OpenMANET gateway: phone hotspot, NAT, DNS forwarding, ATAK CoT multicast relay, web UI with login, OTA partitions. Being joined to the mesh layer; see below. |
+| `firmware/hopnode` | **The hop node.** 802.11s mesh link with peering plus batman-adv (BATMAN_V). No hotspot, no page. Two of them peer, route over HaLow and ping each other across bat0. |
+| `firmware/openmanet-gateway` | Will Shields' OpenMANET-XIAO-Gateway, imported with its full history (GPL-3.0), plus a `mesh` node role: his phone hotspot, NAT, DNS forwarding, ATAK CoT multicast relay, web UI with login and OTA partitions, with the HaLow radio as a mesh point. |
+| `firmware/halowmesh` | HalowChat: group chat with photos over the XIAO mesh, a phone hotspot and chat page per board. Doubles as a range and speed tester. |
+| `firmware/batman-probe` | batman-adv on the ESP32 over 2.4 GHz Wi-Fi, for testing against a Linux batman-adv node on a LAN (`docs/linux-batman-peer.sh` sets one up). |
+| `firmware/mesh-probe` | The experiments that found the mesh recipe: interface types, beacon scheduling, over-the-air checks, peering frames, 4-address data. Each one written up with its numbers. |
+| `firmware/halowchat` | The first chat, hub based (one board is a HaLow access point). Works, kept as a fallback. |
+| `docs/` | `batman-adv-on-esp32.md`: the protocol as implemented, from the kernel source, with results. |
 
-## Status (2026-10-18)
-
-- **batman-adv runs over HaLow between two XIAOs.** `firmware/hopnode`: both boards peer,
-  exchange ELP and OGM2, learn each other's translation tables and ping each other's bat0
-  over the mesh. The hop node's core is done; what it lacks is the mesh password a real
-  OpenMANET net demands, and a third board to prove relaying.
-- **batman-adv runs on the ESP32.** `firmware/batman-probe` is a BATMAN_V node written from
-  the kernel source: ELP, OGM2, translation table, unicast, broadcast, fragments. Tested
-  against a Linux batman-adv node over 2.4 GHz Wi-Fi: seen, routed, translated, pinged at
-  every packet size (`docs/batman-adv-on-esp32.md`, "Result"). Not yet over HaLow: that
-  needs 802.11s peering and the mesh password first.
-- **The gateway runs on the mesh.** `firmware/openmanet-gateway` has a third node role,
-  `mesh`, on by default: Will Shields' phone hotspot, NAT and ATAK CoT multicast relay, with
-  the HaLow radio as a mesh point instead of a station. Two boards on the desk: both come up
-  as mesh nodes, see each other, NAT their hotspots onto the mesh and join the CoT group on
-  both sides. Phones on different boards should see each other in ATAK. Untested with ATAK
-  itself so far.
-
-- Mesh chat runs on two boards: both bring up the mesh on the stock chip firmware, find
-  each other from beacons, discover each other's chat in under 20 s, and unicast pings
-  across the mesh answer in about 15 ms.
-- First range test (2026-10-18): a phone on one board chatted with the other board 245 ft
-  away through the wall of a house with aluminium siding, with the TX power still capped
-  at 8 dBm (the bench setting; the chip allows far more).
-- Relaying through a middle board is implemented but not yet tested (needs a third board
-  out of range of the first).
-- Implemented now: 802.11s peering (open security). Not yet: the mesh password, HWMP path
-  selection. Routing is flooding with a hop limit, duplicate suppression and routes learned
-  from traffic.
-- Photos work and double as a speed test: a 300 KB photo crosses from one board to the
-  other in 2.6 s, about 900 kbit/s on the desk at a 2 MHz channel, with rate selection by
-  signal strength and 32 KB TCP windows. At the SDK's defaults it was 200 kbit/s. Chat and
-  photos are fine, video is not; the ceiling is the ESP32 feeding the chip one frame at a
-  time, not the radio.
+Shared pieces: `mesh.c` (the mesh link) and `batadv.c` (batman-adv) are the same files in
+every firmware that uses them.
 
 ## Quick start
 
-Two firmwares to choose from. The gateway is the one for ATAK and OpenMANET work; the chat
-is the one with the chat page and photos.
+Requirements: ESP-IDF v5.4.4, the `morsemicro/halow` component 2.11.2-esp32-2 (fetched by
+the build), a 2 A power supply per board for full power in the field. Boards on a desk
+should sit a few feet apart; closer than that they overload each other's receivers.
+
+**Hop node:**
+
+```bash
+. ~/esp/esp-idf/export.sh
+cd firmware/hopnode
+idf.py set-target esp32s3
+idf.py -p /dev/cu.usbmodemXXXX flash monitor
+```
+
+Flash every node with the same build. Mesh name, channel, TX power and the bat0 subnet are
+under "hopnode" in `idf.py menuconfig`. The serial log shows mesh neighbours and their
+peering state, batman neighbours, originators and clients, and a ping to every known node
+every 15 s. A Linux batman-adv node on the same mesh would list it in `batctl n`, `batctl o`
+and `batctl tg`.
 
 **Gateway (mesh role):**
 
 ```bash
-. ~/esp/esp-idf/export.sh
 cd firmware/openmanet-gateway
 idf.py set-target esp32s3
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
 Join `xiao-gateway-xxxx` (password `openmanet`), open `http://172.16.50.1/`, set a login
-password on first use. The overview shows the HaLow Mesh card: state, mesh name and channel,
-IP on the mesh, neighbours with signal, routes, frame counters. ATAK on a phone on one board
-and ATAK on a phone on another board should see each other through the CoT relay. The
-serial console's `gwcfg-status` prints the same. Mesh name, channel and power are build-time
-settings under "OpenMANET XIAO Gateway: mesh role" in `idf.py menuconfig`; the chat and the
-gateway can share a mesh if both use the same name and channel.
+password on first use. The overview shows the HaLow Mesh card. ATAK on a phone on one board
+and ATAK on a phone on another should see each other through the CoT relay. The serial
+console's `gwcfg-status` prints the same.
 
 **Chat:**
 
 ```bash
-. ~/esp/esp-idf/export.sh
 cd firmware/halowmesh
 idf.py set-target esp32s3
 idf.py -p /dev/cu.usbmodemXXXX flash monitor
 ```
 
-Flash every board with the same build. On a phone, join `HalowChat-XXXX` (password
-`halowchat`), open `http://10.42.100.1`, type a name, chat. Each board shows its radio
-neighbours, the boards it can reach, and a ping time to each.
+On a phone, join `HalowChat-XXXX` (password `halowchat`), open `http://10.42.100.1`, type a
+name, chat, send photos. Each board shows its radio neighbours, peering state, the boards it
+can reach and a ping time to each. The chat and the gateway can share a mesh if both use the
+same mesh name and channel; the hop node too.
 
-Requirements: ESP-IDF v5.4.4, the `morsemicro/halow` component 2.11.2-esp32-2 (fetched by
-the build), a 2 A power supply per board for full power in the field.
+## How the mesh works on this chip
+
+Morselib's access-point code does almost everything a mesh point needs: it configures the
+BSS, builds every beacon on the host, and transmits management frames the host builds. Three
+hooks change the rest, through linker wraps on morselib's internal functions (the esp-halow
+build prefixes them with `mmint_`):
+
+1. When morselib asks the chip for its access-point interface, send the same request with
+   interface type MESH (5) instead of AP (2).
+2. Send one extra chip command, `MESH_CONFIG` (0x0039, start, beaconing on), taken from the
+   Linux driver's command header, with the Linux driver's default timing values. Without it
+   the chip accepts the interface but never schedules beacons; with zeroed timing fields it
+   crashes the chip.
+3. In every beacon morselib builds, rewrite the SSID element into a Mesh ID element and
+   append a Mesh Configuration element.
+
+Data frames are built by `mesh.c`: QoS data, four addresses, a Mesh Control field, LLC/SNAP,
+the Ethernet payload. They go out through morselib's management transmit helper and a wrap
+marks them as data. Every frame the chip hands the host passes through a wrap on the receive
+entry, which takes the mesh frames and leaves the rest to morselib. Peering is the standard
+802.11s Open, Confirm and Close exchange with link ids and retries. Details, numbers and the
+probes that found each piece: `firmware/mesh-probe/README.md` and
+`firmware/halowmesh/README.md`.
 
 ## Roadmap: joining the OpenMANET ecosystem
 
-The hope is for these cheap boards to become part of the OpenMANET world: XIAO nodes
-meshing among themselves and, where a Raspberry Pi node is present, handing traffic into an
-OpenMANET network. OpenMANET runs OpenWrt on a Pi with a HaLow HAT, 802.11s mesh with a mesh
-password, and batman-adv (BATMAN_V) routing on top. To talk to it, a XIAO has to speak both
-layers. Here is the plan, in the order it will be attempted. None of it is promised; each
-step gets its own probe first, the way everything above was done.
+OpenMANET runs OpenWrt on a Pi with a HaLow HAT, 802.11s mesh with a mesh password, and
+batman-adv (BATMAN_V) routing on top. To be a node in it, a XIAO has to speak both layers.
 
-**Step 1, done: the radio.** Mesh interface, Mesh ID beacons, peering frames and 4-address
-data frames all work on the chip from the ESP32. This repository.
+1. **Done: the radio.** Mesh interface, Mesh ID beacons, peering frames, 4-address data.
+2. **Done: our own mesh.** Flooding, duplicate suppression, learned routes, IP, chat on top.
+3. **Done as far as it can be without a Pi: the gateway on the mesh.** Will Shields'
+   OpenMANET-XIAO-Gateway was designed to join a HaLow access point on a Pi; his own research
+   found that no OpenMANET role exposes one, and a Pi with one HaLow HAT has only one radio,
+   busy being a mesh point. The mesh layer is the way around that gap: the gateway's uplink
+   is the mesh.
+4. **Done, open security: 802.11s peering.** Next proof is a Linux mesh point (a HaLowLink 1
+   is on its way) accepting the XIAO as a peer, which is where the exact element contents get
+   checked with a packet capture.
+5. **Next: the mesh password.** SAE between peers, the authenticated peering exchange, then
+   per-neighbour keys loaded into the chip. The chip does the encryption; the handshake code
+   is the work. The mesh versions of that code exist in the SDK tree uncompiled. This is the
+   step that lets a XIAO peer with a real OpenMANET node. Deferred until the HaLowLink is here
+   to test against.
+6. **Done over Wi-Fi and over HaLow: batman-adv on the ESP32.** `docs/batman-adv-on-esp32.md`.
+   Joining a real OpenMANET net waits on step 5.
+7. **The ecosystem.** ATAK multicast and position sharing between phones on XIAO gateways and
+   the rest of the net, XIAO nodes visible in OpenMANET's UI, Pis only where internet, camera
+   or voice live.
 
-**Step 2, done: our own mesh.** Flooding, duplicate suppression, learned routes, IP on top,
-chat on top of that. Works between two boards; relaying through a third is next to test.
-
-**Step 3: the gateway, joined to the mesh.** Will Shields' OpenMANET-XIAO-Gateway (now in
-`firmware/openmanet-gateway`) already does the XIAO side of an OpenMANET node: phone hotspot,
-NAT, DNS forwarding, an ATAK CoT multicast relay, a web UI with login, OTA partitions. It was
-designed to join a HaLow access point on a Pi, and its own research found the catch: no
-OpenMANET role exposes the Pi's HaLow radio as a plain access point, and a Pi with one HaLow
-HAT has only one radio, which is busy being a mesh point. Their notes call it a real gap in
-the ecosystem. Our mesh layer is the other way round that gap: the gateway's uplink becomes
-the mesh instead of a station link, so XIAOs form an ATAK-capable net among themselves now,
-and join the Pi's mesh once steps 4 to 6 land. The work: a `uplink_mesh` module in the
-gateway that wraps `mesh.c`, a third node role next to its client and relay roles.
-
-**Step 4: 802.11s peering. Done, open security.** Mesh Peering Open, Confirm and Close with
-link ids, timers and retries, in the mesh layer, with data gated on an established peering.
-Two XIAOs peer within a second of boot. Next proof: a Linux mesh point (the HaLowLink 1)
-accepting the XIAO as a peer, which is where the exact element contents get checked.
-
-**Step 5: the mesh password.** OpenMANET nodes encrypt the mesh: SAE authentication between
-peers, then the authenticated peering exchange, then per-neighbour keys loaded into the
-chip. The chip does the encryption; the handshake code is the work. The mesh versions of
-that code exist in the SDK tree uncompiled (`mesh_rsn.c`, `mesh_mpm.c`) but are written
-against Linux driver calls. Weeks of careful crypto plumbing, and the step that lets a XIAO
-peer with a real OpenMANET node at the radio layer.
-
-**Step 6: batman-adv on the ESP32. Done over Wi-Fi and over HaLow.** `firmware/batman-probe`
-talks to Linux batman-adv (`docs/batman-adv-on-esp32.md`); `firmware/hopnode` runs the same
-code over the peered HaLow mesh link between XIAOs. Joining a real OpenMANET net waits on
-step 5. Peering gets a XIAO heard; batman-adv gets
-it understood. Everything OpenMANET sends rides inside batman-adv frames (ethertype 0x4305):
-ELP hellos every half second, OGMv2 route announcements, translation tables with checksums
-that say which client addresses sit behind which node, and its own unicast and broadcast
-wrapping. The plan is a minimal BATMAN_V node, not a port of the Linux module: send ELP and
-OGMv2 so other nodes see us, learn originators and next hops from their OGMv2, announce our
-own address (and our phone hotspot clients) in the translation table, answer translation
-table requests, wrap and unwrap unicast and broadcast. The Linux batman-adv source and the
-open-mesh.org protocol documents are the reference; a Pi running OpenMANET is the test rig.
-This is the biggest piece and the least certain. If it works, a XIAO becomes a first-class
-OpenMANET node with no Pi needed except where internet or the heavy apps live.
-
-**Step 7: the ecosystem.** OpenMANET's apps run over IP on the mesh: position sharing, ATAK
-over multicast, push-to-talk. Once a XIAO is a batman node, the first targets are passing
-ATAK multicast between a phone on the XIAO's hotspot and the rest of the net, and a small
-status beacon so OpenMANET's UI can show XIAO nodes. Where the mesh needs a Pi (gateway,
-camera, voice), the XIAOs extend its reach cheaply.
-
-Help is welcome on any step, especially from anyone who knows batman-adv internals, 802.11s
-security, or the Morse Micro Linux driver.
+For the hop node itself, after step 5: a third board to show a packet crossing a hop; power
+and enclosure for an outdoor, forgotten node; provisioning without a build (mesh name and
+password from a page or the USB console). Help is welcome on any of it, especially from
+anyone who knows batman-adv internals, 802.11s security, or the Morse Micro Linux driver.
 
 ## Credits and references
 
@@ -202,7 +191,9 @@ security, or the Morse Micro Linux driver.
 - Morse Micro: the MM6108, morselib (microcontroller SDK, now published with source) and
   the open-source Linux driver whose command header provided the mesh command.
   https://github.com/MorseMicro
-- Seeed Studio: XIAO ESP32S3 and the Wio-WM6180 module.
+- The Linux kernel's `net/batman-adv`, the reference for `batadv.c`.
+- OpenMANET: https://openmanet.github.io/docs/
+- Seeed Studio: XIAO ESP32S3 and the Wi-Fi HaLow module for XIAO.
 - Teapot Labs `mm-esp32-halow` for the bench power lessons on this board.
 
 ## Licence
@@ -214,7 +205,8 @@ Morse Micro's `morselib` (GPL-3.0-or-later or a commercial licence from Morse Mi
 chip firmware (their binary distribution licence). This repository does not contain the Morse
 Micro parts; follow their rules for those, especially if you redistribute built firmware.
 
-The files we wrote ourselves (`firmware/halowmesh`, `firmware/mesh-probe`, `firmware/halowchat`,
-marked `SPDX-License-Identifier: 0BSD OR GPL-3.0-or-later`) are additionally offered under
-0BSD, see `LICENSES/0BSD.txt`: take those on their own for anything, no conditions, credit
-welcome and never required. Open with love for the community.
+The files we wrote ourselves (`firmware/hopnode`, `firmware/halowmesh`, `firmware/batman-probe`,
+`firmware/mesh-probe`, `firmware/halowchat`, marked `SPDX-License-Identifier: 0BSD OR
+GPL-3.0-or-later`) are additionally offered under 0BSD, see `LICENSES/0BSD.txt`: take those on
+their own for anything, no conditions, credit welcome and never required. Open with love for
+the community.
