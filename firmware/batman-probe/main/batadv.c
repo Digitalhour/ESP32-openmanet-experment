@@ -1307,6 +1307,81 @@ static void process_unicast_tvlv(const uint8_t *sender, const uint8_t *p, size_t
     }
 }
 
+/* ---------- ICMP (batctl ping and traceroute) ----------
+ * batadv_recv_icmp_packet / batadv_recv_my_icmp_packet / batadv_recv_icmp_ttl_exceeded. We
+ * answer echo requests and TTL-exceeded for traceroute, record our address in the route
+ * list, and forward the rest. Replies addressed to us go nowhere: there is no batctl here. */
+
+#define ICMP_ECHO_REPLY 0
+#define ICMP_ECHO_REQUEST 8
+#define ICMP_TTL_EXCEEDED 11
+#define ICMP_RR_LEN 16
+
+struct __attribute__((packed)) icmp_packet
+{
+    uint8_t packet_type, version, ttl, msg_type;
+    uint8_t dst[6], orig[6];
+    uint8_t uid, rr_cur;
+    uint16_t seqno;
+    /* followed by rr[ICMP_RR_LEN][6] in the record-route form batctl sends */
+};
+
+static uint32_t s_icmp_answered;
+
+static void process_icmp(const uint8_t *sender, const uint8_t *p, size_t len)
+{
+    (void)sender;
+    if (len < sizeof(struct icmp_packet))
+    {
+        return;
+    }
+    uint8_t *copy = malloc(len);
+    if (copy == NULL)
+    {
+        return;
+    }
+    memcpy(copy, p, len);
+    struct icmp_packet *ic = (struct icmp_packet *)copy;
+    if ((ic->msg_type == ICMP_ECHO_REQUEST || ic->msg_type == ICMP_ECHO_REPLY) &&
+        len >= sizeof(*ic) + ICMP_RR_LEN * 6 && ic->rr_cur < ICMP_RR_LEN)
+    {
+        memcpy(copy + sizeof(*ic) + ic->rr_cur * 6, s_cfg.hardif_mac, 6);
+        ic->rr_cur++;
+    }
+    if (mac_eq(ic->dst, s_cfg.hardif_mac) || ic->ttl < 2)
+    {
+        if (ic->msg_type == ICMP_ECHO_REQUEST)
+        {
+            bool mine = mac_eq(ic->dst, s_cfg.hardif_mac);
+            int oi = orig_find(ic->orig);
+            if (oi >= 0)
+            {
+                memcpy(ic->dst, ic->orig, 6);
+                memcpy(ic->orig, s_cfg.hardif_mac, 6);
+                ic->msg_type = mine ? ICMP_ECHO_REPLY : ICMP_TTL_EXCEEDED;
+                ic->ttl = TTL_DEFAULT;
+                if (send_to_orig(oi, copy, len) == ESP_OK && mine)
+                {
+                    s_icmp_answered++;
+                    char a[18];
+                    mac_str(ic->dst, a);
+                    ESP_LOGI(TAG, "echo request %u from %s answered", (unsigned)be16(ic->seqno), a);
+                }
+            }
+        }
+    }
+    else
+    {
+        int oi = orig_find(ic->dst);
+        if (oi >= 0)
+        {
+            ic->ttl--;
+            send_to_orig(oi, copy, len);
+        }
+    }
+    free(copy);
+}
+
 static void process_packet(const uint8_t *sender, const uint8_t *p, size_t len)
 {
     if (len < 2 || p[1] != COMPAT_VERSION)
@@ -1322,7 +1397,7 @@ static void process_packet(const uint8_t *sender, const uint8_t *p, size_t len)
         case PT_BCAST: process_bcast(sender, p, len); break;
         case PT_UNICAST_FRAG: process_frag(sender, p, len); break;
         case PT_UNICAST_TVLV: process_unicast_tvlv(sender, p, len); break;
-        case PT_ICMP: break;
+        case PT_ICMP: process_icmp(sender, p, len); break;
         default: s_stats.unknown_type++; break;
     }
 }

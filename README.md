@@ -20,14 +20,15 @@ Two things in this repository did not exist before:
 
 `firmware/hopnode` is those two layers and nothing else: the hop node.
 
-## What works today (2026-10-19)
+## What works today (2026-10-21)
 
 | | Result |
 |---|---|
-| Mesh interface, Mesh ID beacons, 4-address data on the chip | works, stock chip firmware |
-| 802.11s peering (Open, Confirm, Close, retries), data gated on it | works, two XIAOs peer in about 1 s |
+| Mesh interface, Mesh ID beacons, mesh data frames on the chip | works, stock chip firmware |
+| 802.11s peering (Open, Confirm, Close, retries), data gated on it | works, two XIAOs peer in about 1 s; a Morse HaLowLink 1 (Linux, stock OpenWrt) lists both XIAOs as established peers |
 | batman-adv against a Linux batman-adv node, over 2.4 GHz Wi-Fi | seen, routed, translated; pings 20 of 20, full-size and 8000-byte pings pass |
 | batman-adv between two XIAOs over HaLow | both route each other, bat0 pings across the mesh |
+| batman-adv with a Linux node on the HaLow mesh (HaLowLink 1 running batman-adv over its mesh interface) | `batctl` shows both XIAOs as neighbours, originators and translation-table clients; IP pings 10 of 10 to each XIAO, 1400-byte pings 5 of 5, `batctl ping` 5 of 5, traceroute one hop |
 | Chat with photos over the XIAO mesh (no batman) | 245 ft through an aluminium-sided wall at 8 dBm; 300 KB photo in 2.6 s |
 | Will Shields' OpenMANET gateway (hotspot, NAT, ATAK CoT relay) on the mesh | both boards come up as mesh nodes, NAT on, CoT group joined; untested with ATAK itself |
 | The mesh password (SAE) a real OpenMANET net requires | not yet |
@@ -65,13 +66,13 @@ tell us what you built.
 
 | Directory | What |
 |---|---|
-| `firmware/hopnode` | **The hop node.** 802.11s mesh link with peering plus batman-adv (BATMAN_V). No hotspot, no page. Two of them peer, route over HaLow and ping each other across bat0. |
+| `firmware/hopnode` | **The hop node.** 802.11s mesh link with peering plus batman-adv (BATMAN_V). No hotspot, no page. Two of them peer, route over HaLow and ping each other across bat0; a Linux mesh point running batman-adv (HaLowLink 1) peers and routes with them too. |
 | `firmware/openmanet-gateway` | Will Shields' OpenMANET-XIAO-Gateway, imported with its full history (GPL-3.0), plus a `mesh` node role: his phone hotspot, NAT, DNS forwarding, ATAK CoT multicast relay, web UI with login and OTA partitions, with the HaLow radio as a mesh point. |
 | `firmware/halowmesh` | HalowChat: group chat with photos over the XIAO mesh, a phone hotspot and chat page per board. Doubles as a range and speed tester. |
 | `firmware/batman-probe` | batman-adv on the ESP32 over 2.4 GHz Wi-Fi, for testing against a Linux batman-adv node on a LAN (`docs/linux-batman-peer.sh` sets one up). |
 | `firmware/mesh-probe` | The experiments that found the mesh recipe: interface types, beacon scheduling, over-the-air checks, peering frames, 4-address data. Each one written up with its numbers. |
 | `firmware/halowchat` | The first chat, hub based (one board is a HaLow access point). Works, kept as a fallback. |
-| `docs/` | `batman-adv-on-esp32.md`: the protocol as implemented, from the kernel source, with results. |
+| `docs/` | `batman-adv-on-esp32.md`: the protocol as implemented, from the kernel source, with results. `halowlink1-mesh.sh` and `halowlink1-batman.sh`: put a Morse HaLowLink 1 into open mesh point mode and run batman-adv over it, the Linux peer used for the tests. `linux-batman-peer.sh`: the same for a LAN test over Wi-Fi. |
 
 Shared pieces: `mesh.c` (the mesh link) and `batadv.c` (batman-adv) are the same files in
 every firmware that uses them.
@@ -139,13 +140,25 @@ build prefixes them with `mmint_`):
 3. In every beacon morselib builds, rewrite the SSID element into a Mesh ID element and
    append a Mesh Configuration element.
 
-Data frames are built by `mesh.c`: QoS data, four addresses, a Mesh Control field, LLC/SNAP,
-the Ethernet payload. They go out through morselib's management transmit helper and a wrap
-marks them as data. Every frame the chip hands the host passes through a wrap on the receive
-entry, which takes the mesh frames and leaves the rest to morselib. Peering is the standard
-802.11s Open, Confirm and Close exchange with link ids and retries. Details, numbers and the
-probes that found each piece: `firmware/mesh-probe/README.md` and
-`firmware/halowmesh/README.md`.
+Data frames are built by `mesh.c`: QoS data, four addresses for unicast and three for group
+frames, a Mesh Control field, LLC/SNAP, the Ethernet payload. They go out through morselib's
+management transmit helper and a wrap marks them as data. Every frame the chip hands the host
+passes through a wrap on the receive entry, which takes the mesh frames and leaves the rest
+to morselib. Peering is the standard 802.11s Open, Confirm and Close exchange with link ids
+and retries. Details, numbers and the probes that found each piece:
+`firmware/mesh-probe/README.md` and `firmware/halowmesh/README.md`.
+
+Three things a Linux mesh point (Morse HaLowLink 1, stock OpenWrt 23.05 with Morse 2.7.6)
+needed before it would talk to us, all found with its own logs and `tcpdump`:
+
+- The Morse Linux driver drops a Mesh Peering Confirm that has no S1G Capabilities element,
+  before mac80211 sees it (`morse_mac_capabilities_validate`). Open and Confirm now carry
+  the same element our beacons do.
+- mac80211 drops a group-addressed mesh data frame in the four-address form
+  (`ieee80211_rx_mesh_check`). Broadcasts use the three-address form the standard asks for:
+  From DS only, DA, TA, SA.
+- A Linux mesh point will not unicast to a peer until an HWMP Path Request gets a Path
+  Reply. `mesh.c` answers requests that name it and keeps no paths of its own.
 
 ## Roadmap: joining the OpenMANET ecosystem
 
@@ -159,16 +172,18 @@ batman-adv (BATMAN_V) routing on top. To be a node in it, a XIAO has to speak bo
    found that no OpenMANET role exposes one, and a Pi with one HaLow HAT has only one radio,
    busy being a mesh point. The mesh layer is the way around that gap: the gateway's uplink
    is the mesh.
-4. **Done, open security: 802.11s peering.** Next proof is a Linux mesh point (a HaLowLink 1
-   is on its way) accepting the XIAO as a peer, which is where the exact element contents get
-   checked with a packet capture.
+4. **Done, open security: 802.11s peering.** Proven against a Linux mesh point: a Morse
+   HaLowLink 1 on stock firmware lists both XIAOs as established peers, resolves paths to them
+   and exchanges data both ways. The three fixes that took are in the section above.
 5. **Next: the mesh password.** SAE between peers, the authenticated peering exchange, then
    per-neighbour keys loaded into the chip. The chip does the encryption; the handshake code
    is the work. The mesh versions of that code exist in the SDK tree uncompiled. This is the
    step that lets a XIAO peer with a real OpenMANET node. Deferred until the HaLowLink is here
    to test against.
 6. **Done over Wi-Fi and over HaLow: batman-adv on the ESP32.** `docs/batman-adv-on-esp32.md`.
-   Joining a real OpenMANET net waits on step 5.
+   With batman-adv running on the HaLowLink's mesh interface, `batctl` on the Linux side shows
+   the XIAOs as neighbours, originators and translation-table clients, pings them over IP and
+   with `batctl ping`, and traceroutes them. Joining a real OpenMANET net waits on step 5.
 7. **The ecosystem.** ATAK multicast and position sharing between phones on XIAO gateways and
    the rest of the net, XIAO nodes visible in OpenMANET's UI, Pis only where internet, camera
    or voice live.
