@@ -26,6 +26,11 @@ struct mesh_config
     uint8_t tx_dbm;     /* cap, 0 = regulatory maximum */
     uint8_t ttl;        /* hop limit for frames this board sends */
     bool require_peering; /* only exchange data with neighbours the 802.11s peering handshake accepted */
+    /* Layer 2 mode for a routing protocol above (batman-adv): no network interface, no
+     * relaying, no flooding. Every received frame goes to l2_rx as an Ethernet frame, and
+     * mesh_send_ethernet() sends one hop to the neighbour named in its destination. */
+    bool l2_mode;
+    void (*l2_rx)(const uint8_t *frame, size_t len);
     /* Board bring-up knobs, 0 = the values proven on the XIAO + Wio-WM6180 bench. */
     uint32_t spi_max_hz;      /* cap on the SPI clock to the chip (40 MHz) */
     uint16_t reset_hold_ms;   /* how long the chip is held in reset (8000) */
@@ -77,6 +82,8 @@ struct mesh_stats
  * up: set its IP address, then esp_netif_action_connected()). Call once. */
 esp_err_t mesh_start(const struct mesh_config *cfg);
 bool mesh_is_up(void);
+/* l2_mode: send an Ethernet frame to the neighbour in its destination (or to all, if group). */
+esp_err_t mesh_send_ethernet(const uint8_t *frame, size_t len);
 esp_netif_t *mesh_netif(void);
 void mesh_get_addr(uint8_t out[6]);
 const char *mesh_chip_firmware(void);

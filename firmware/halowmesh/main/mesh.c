@@ -61,6 +61,11 @@ static const char *TAG = "mesh";
 
 /* Mesh peering management: category 15 (self-protected), actions 1 open, 2 confirm, 3 close. */
 #define CAT_SELF_PROTECTED 15
+/* HWMP path selection (802.11-2020 14.10): category 13 (mesh), action 1, PREQ/PREP elements. */
+#define CAT_MESH 13
+#define IE_PREQ 130
+#define IE_PREP 131
+#define HWMP_ELEMENT_TTL 31
 #define PLINK_OPEN 1
 #define PLINK_CONFIRM 2
 #define PLINK_CLOSE 3
@@ -154,6 +159,7 @@ struct consbuf;
 typedef void (*mgmt_frame_builder_t)(struct umac_data *umacd, struct consbuf *buf, void *params);
 struct mmpkt *mmint_build_mgmt_frame(struct umac_data *umacd, mgmt_frame_builder_t builder, void *params);
 void mmint_consbuf_append(struct consbuf *buf, const uint8_t *data, uint32_t len);
+void mmint_ie_s1g_capabilities_build_ap(struct umac_data *umacd, struct consbuf *buf);
 struct mmpkt *mmint_umac_datapath_alloc_raw_tx_mmpkt(uint8_t pkt_class, uint32_t space_at_start, uint32_t space_at_end);
 enum mmwlan_status mmint_umac_datapath_tx_mgmt_frame_ap(struct umac_data *umacd, struct mmpkt *txbuf,
                                                         struct mmrc_rate *rate_override);
@@ -662,7 +668,12 @@ static bool dedupe_seen(const uint8_t *src, uint32_t seq)
 static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t *sa, uint8_t ttl, uint32_t seq,
                             uint16_t ethertype, const uint8_t *payload, size_t payload_len)
 {
-    size_t len = FRAME_OVERHEAD + payload_len;
+    /* Group-addressed mesh data uses three addresses (DA, TA, SA; From DS only), individually
+     * addressed uses four (RA, TA, DA, SA; To DS + From DS). 802.11-2020 9.3.2.1 table 9-30;
+     * mac80211 drops a group frame in the four-address form (ieee80211_rx_mesh_check). */
+    bool group = (da[0] & 1) != 0;
+    size_t hdr = group ? 24 : 30;
+    size_t len = hdr + 2 + MESH_CTRL_LEN + LLC_LEN + payload_len;
     if (len > MAX_FRAME)
     {
         return ESP_ERR_INVALID_SIZE;
@@ -690,26 +701,37 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
         return ESP_ERR_NO_MEM;
     }
     uint8_t *p = mmpkt_append(view, len);
-    memset(p, 0, HDR_LEN);
-    p[0] = 0x88;                 /* data, QoS data */
-    p[1] = 0x03;                 /* To DS + From DS: four addresses */
-    memcpy(&p[4], ra, 6);        /* address 1: receiver, the next hop */
-    memcpy(&p[10], s_addr, 6);   /* address 2: transmitter, us */
-    memcpy(&p[16], da, 6);       /* address 3: final destination */
-    memcpy(&p[24], sa, 6);       /* address 4: original source */
-    p[30] = 0x00;                /* QoS control: TID 0 */
-    p[31] = 0x01;                /* Mesh Control present */
-    p[32] = 0x00;                /* mesh flags */
-    p[33] = ttl;
-    p[34] = (uint8_t)seq;
-    p[35] = (uint8_t)(seq >> 8);
-    p[36] = (uint8_t)(seq >> 16);
-    p[37] = (uint8_t)(seq >> 24);
+    memset(p, 0, hdr + 2);
+    p[0] = 0x88;                     /* data, QoS data */
+    if (group)
+    {
+        p[1] = 0x02;                 /* From DS: three addresses */
+        memcpy(&p[4], da, 6);        /* address 1: the group */
+        memcpy(&p[10], s_addr, 6);   /* address 2: transmitter, us */
+        memcpy(&p[16], sa, 6);       /* address 3: original source */
+    }
+    else
+    {
+        p[1] = 0x03;                 /* To DS + From DS: four addresses */
+        memcpy(&p[4], ra, 6);        /* address 1: receiver, the next hop */
+        memcpy(&p[10], s_addr, 6);   /* address 2: transmitter, us */
+        memcpy(&p[16], da, 6);       /* address 3: final destination */
+        memcpy(&p[24], sa, 6);       /* address 4: original source */
+    }
+    uint8_t *q = p + hdr;
+    q[0] = 0x00;                     /* QoS control: TID 0 */
+    q[1] = 0x01;                     /* Mesh Control present */
+    q[2] = 0x00;                     /* mesh flags: no address extension */
+    q[3] = ttl;
+    q[4] = (uint8_t)seq;
+    q[5] = (uint8_t)(seq >> 8);
+    q[6] = (uint8_t)(seq >> 16);
+    q[7] = (uint8_t)(seq >> 24);
     static const uint8_t llc[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
-    memcpy(&p[38], llc, sizeof(llc));
-    p[44] = (uint8_t)(ethertype >> 8);
-    p[45] = (uint8_t)ethertype;
-    memcpy(&p[46], payload, payload_len);
+    memcpy(&q[8], llc, sizeof(llc));
+    q[14] = (uint8_t)(ethertype >> 8);
+    q[15] = (uint8_t)ethertype;
+    memcpy(&q[16], payload, payload_len);
     mmpkt_close(&view);
 
     s_tx_rssi_hint = rssi_hint;
@@ -752,6 +774,19 @@ static esp_err_t mesh_transmit(void *h, void *buffer, size_t len)
     }
     uint32_t seq = ++s_seq;
     return send_frame(next_hop, dst, s_addr, s_cfg.ttl, seq, ethertype, eth + 14, len - 14);
+}
+
+esp_err_t mesh_send_ethernet(const uint8_t *frame, size_t len)
+{
+    if (len < 14)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const uint8_t *dst = frame;
+    uint16_t ethertype = (frame[12] << 8) | frame[13];
+    const uint8_t *next_hop = (dst[0] & 1) ? BROADCAST : dst;
+    uint32_t seq = ++s_seq;
+    return send_frame(next_hop, dst, s_addr, 1, seq, ethertype, frame + 14, len - 14);
 }
 
 static esp_err_t mesh_transmit_wrap(void *h, void *buffer, size_t len, void *netstack_buf)
@@ -813,9 +848,11 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
                 i += 2 + l;
             }
         }
-        else if (ftype == 2 && (d[1] & 0x03) == 0x03 && len >= HDR_LEN)
+        else if (ftype == 2 && len >= HDR_LEN &&
+                 ((d[1] & 0x03) == 0x03 || ((d[1] & 0x03) == 0x02 && (d[4] & 1))))
         {
             consumed = true;
+            const uint8_t *src = ((d[1] & 0x03) == 0x03) ? &d[24] : &d[16];
             bool peer_ok = true;
             if (s_cfg.require_peering)
             {
@@ -827,7 +864,7 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
             {
                 s_stats.rx_unpeered++;
             }
-            else if (!mac_eq(&d[24], s_addr))   /* our own frame relayed back to us */
+            else if (!mac_eq(src, s_addr))   /* our own frame relayed back to us */
             {
                 struct rx_item *it = malloc(sizeof(*it) + len);
                 if (it != NULL)
@@ -845,15 +882,16 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
                 }
             }
         }
-        else if (ftype == 0 && subtype == 13 && len >= 26 && d[24] == CAT_SELF_PROTECTED)
+        else if (ftype == 0 && subtype == 13 && len >= 26 &&
+                 (d[24] == CAT_SELF_PROTECTED || (d[24] == CAT_MESH && d[25] == 1)))
         {
-            consumed = true;   /* a mesh peering frame: handled by the mesh task */
+            consumed = true;   /* mesh peering or HWMP path selection: handled by the mesh task */
             struct rx_item *it = malloc(sizeof(*it) + len);
             if (it != NULL)
             {
                 it->len = (uint16_t)len;
                 it->rssi = rssi;
-                it->kind = 1;
+                it->kind = (d[24] == CAT_SELF_PROTECTED) ? 1 : 2;
                 memcpy(it->data, d, len);
                 if (xQueueSend(s_rx_queue, &it, 0) != pdTRUE)
                 {
@@ -897,7 +935,6 @@ struct plink_frame_params
 
 static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void *params)
 {
-    (void)umacd;
     const struct plink_frame_params *f = (const struct plink_frame_params *)params;
     uint8_t hdr[24] = { 0 };
     hdr[0] = 0xd0;                                    /* management, action */
@@ -950,9 +987,101 @@ static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void
         mpm_len = 10;
     }
     mmint_consbuf_append(buf, mpm, mpm_len);
+
+    /* S1G Capabilities (217). The Morse Linux driver drops a Mesh Peering Confirm that
+     * lacks one before mac80211 sees it (morse_mac_capabilities_validate); Linux mesh
+     * points put it in Open and Confirm, so do we. Same element our beacons carry. */
+    if (f->action != PLINK_CLOSE)
+    {
+        mmint_ie_s1g_capabilities_build_ap(umacd, buf);
+    }
 }
 
 /* Caller holds s_lock. */
+/* ---------- HWMP (just enough to be found) ----------
+ * A Linux mesh point resolves the next hop for a unicast with an HWMP Path Request; without a
+ * Path Reply its frames to us queue up and die. We answer requests that name us as the target
+ * and keep no paths of our own: routing above this layer is batman-adv's job. */
+
+struct prep_params
+{
+    uint8_t to[6], orig[6], orig_sn[4], lifetime[4];
+    uint32_t target_sn;
+};
+
+static uint32_t s_hwmp_sn;
+static uint32_t s_hwmp_prep_tx;
+
+static void build_prep_frame(struct umac_data *umacd, struct consbuf *buf, void *params)
+{
+    (void)umacd;
+    const struct prep_params *f = (const struct prep_params *)params;
+    uint8_t hdr[24] = { 0 };
+    hdr[0] = 0xd0;                                    /* management, action */
+    memcpy(&hdr[4], f->to, 6);
+    memcpy(&hdr[10], s_addr, 6);
+    memcpy(&hdr[16], s_addr, 6);
+    mmint_consbuf_append(buf, hdr, sizeof(hdr));
+
+    uint8_t body[2 + 2 + 31] = { CAT_MESH, 1, IE_PREP, 31 };
+    uint8_t *e = &body[4];
+    e[0] = 0;                                         /* flags: no address extension */
+    e[1] = 0;                                         /* hop count */
+    e[2] = HWMP_ELEMENT_TTL;
+    memcpy(&e[3], s_addr, 6);                         /* target: us */
+    e[9] = (uint8_t)f->target_sn;
+    e[10] = (uint8_t)(f->target_sn >> 8);
+    e[11] = (uint8_t)(f->target_sn >> 16);
+    e[12] = (uint8_t)(f->target_sn >> 24);
+    memcpy(&e[13], f->lifetime, 4);
+    memset(&e[17], 0, 4);                             /* metric: the receiver adds its link */
+    memcpy(&e[21], f->orig, 6);
+    memcpy(&e[27], f->orig_sn, 4);
+    mmint_consbuf_append(buf, body, sizeof(body));
+}
+
+static void hwmp_process(const uint8_t *d, size_t len)
+{
+    const uint8_t *ta = &d[10];
+    size_t i = 26;
+    while (i + 2 <= len)
+    {
+        uint8_t id = d[i], l = d[i + 1];
+        if (i + 2 + l > len)
+        {
+            break;
+        }
+        const uint8_t *v = &d[i + 2];
+        /* PREQ without address extension: flags, hops, ttl, id(4), orig(6), orig sn(4),
+         * lifetime(4), metric(4), target count, [target flags, addr(6), sn(4)] */
+        if (id == IE_PREQ && l == 37 && v[2] > 0 && v[25] == 1 && mac_eq(&v[27], s_addr))
+        {
+            struct prep_params f;
+            memcpy(f.to, ta, 6);
+            memcpy(f.orig, &v[7], 6);
+            memcpy(f.orig_sn, &v[13], 4);
+            memcpy(f.lifetime, &v[17], 4);
+            f.target_sn = ++s_hwmp_sn;
+            struct mmpkt *pkt = mmint_build_mgmt_frame(s_umacd, build_prep_frame, &f);
+            if (pkt != NULL)
+            {
+                xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+                s_tx_rssi_hint = INT16_MIN;
+                enum mmwlan_status st = mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
+                xSemaphoreGive(s_tx_lock);
+                if (st == MMWLAN_SUCCESS)
+                {
+                    s_hwmp_prep_tx++;
+                    char a[18];
+                    mac_str(f.orig, a);
+                    ESP_LOGI(TAG, "HWMP: path reply %lu to %s", (unsigned long)s_hwmp_prep_tx, a);
+                }
+            }
+        }
+        i += 2 + l;
+    }
+}
+
 static void plink_send(int ni, uint8_t action, uint16_t reason)
 {
     struct mesh_neighbour *n = &s_neighbours[ni];
@@ -1042,6 +1171,16 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
         uint8_t id = frame[i], l = frame[i + 1];
         if (i + 2 + l > len) break;
         const uint8_t *v = &frame[i + 2];
+        if (id == 217)
+        {
+            static bool logged;
+            if (!logged)
+            {
+                logged = true;
+                ESP_LOGI(TAG, "Peer S1G Capabilities element (%u bytes):", (unsigned)l);
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, v, l, ESP_LOG_INFO);
+            }
+        }
         if (id == IE_MESH_ID && l == strlen(s_cfg.mesh_id) && memcmp(v, s_cfg.mesh_id, l) == 0)
         {
             mesh_id_ok = true;
@@ -1247,16 +1386,25 @@ static void mesh_task(void *arg)
             free(it);
             continue;
         }
+        if (it->kind == 2)
+        {
+            hwmp_process(it->data, it->len);
+            free(it);
+            continue;
+        }
         {
             uint32_t dq = (uint32_t)(esp_timer_get_time() - it->t_rx_us);
             s_t_rxq_us_sum += dq; s_t_rxq_n++; if (dq > s_t_rxq_us_max) s_t_rxq_us_max = dq;
         }
         const uint8_t *d = it->data;
         uint32_t len = it->len;
-        const uint8_t *ra = &d[4], *ta = &d[10], *da = &d[16], *sa = &d[24];
+        bool four = (d[1] & 0x03) == 0x03;
+        const uint8_t *ra = &d[4], *ta = &d[10];
+        const uint8_t *da = four ? &d[16] : &d[4], *sa = four ? &d[24] : &d[16];
         bool qos = ((d[0] >> 4) & 0x08) != 0;
-        uint32_t body_at = qos ? 32 : 30;
-        bool mesh_ctrl = qos && (d[31] & 0x01);
+        uint32_t hdr = four ? 30 : 24;
+        uint32_t body_at = hdr + (qos ? 2 : 0);
+        bool mesh_ctrl = qos && (d[hdr + 1] & 0x01);
         uint8_t ttl = 1;
         uint32_t seq = 0;
         if (mesh_ctrl && len >= body_at + MESH_CTRL_LEN)
@@ -1287,6 +1435,27 @@ static void mesh_task(void *arg)
         }
         bool for_me = mac_eq(da, s_addr);
         bool group = (da[0] & 1) != 0;
+
+        if (s_cfg.l2_mode)
+        {
+            if ((for_me || group) && payload != NULL && s_cfg.l2_rx != NULL)
+            {
+                uint8_t *eth = malloc(14 + payload_len);
+                if (eth != NULL)
+                {
+                    memcpy(eth, da, 6);
+                    memcpy(eth + 6, sa, 6);
+                    eth[12] = (uint8_t)(ethertype >> 8);
+                    eth[13] = (uint8_t)ethertype;
+                    memcpy(eth + 14, payload, payload_len);
+                    s_stats.rx_delivered++;
+                    s_cfg.l2_rx(eth, 14 + payload_len);
+                    free(eth);
+                }
+            }
+            free(it);
+            continue;
+        }
 
         if ((for_me || group) && payload != NULL)
         {
@@ -1432,6 +1601,17 @@ esp_err_t mesh_start(const struct mesh_config *cfg)
     }
     s_patch_mesh_id = true;
     mmwlan_ap_get_bssid(s_addr);
+
+    if (s_cfg.l2_mode)
+    {
+        xTaskCreate(mesh_task, "mesh", 6144, NULL, 6, NULL);
+        s_up = true;
+        char la[18];
+        mac_str(s_addr, la);
+        ESP_LOGI(TAG, "Mesh \"%s\" up on channel %u, address %s, chip firmware %s, layer 2 mode", s_cfg.mesh_id,
+                 s_cfg.s1g_chan, la, s_fw_version);
+        return ESP_OK;
+    }
 
     /* The network interface: an Ethernet-style lwIP interface whose link is this file. */
     esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_WIFI_STA();
