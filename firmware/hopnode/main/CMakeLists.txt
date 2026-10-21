@@ -1,7 +1,7 @@
 idf_component_register(
-    SRCS "hop_main.c" "mesh.c" "batadv.c"
+    SRCS "hop_main.c" "mesh.c" "mesh_sec.c" "batadv.c"
     INCLUDE_DIRS "."
-    REQUIRES halow nvs_flash esp_wifi esp_netif esp_event esp_timer lwip esp_driver_spi esp_driver_gpio
+    REQUIRES halow nvs_flash esp_wifi esp_netif esp_event esp_timer lwip esp_driver_spi esp_driver_gpio mbedtls
 )
 
 # esp-halow workarounds and the mesh layer's morselib hooks (see mesh.c).

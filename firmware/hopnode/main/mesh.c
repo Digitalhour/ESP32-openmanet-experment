@@ -38,6 +38,7 @@
 #include "mmrc.h"
 
 #include "mesh.h"
+#include "mesh_sec.h"
 
 static const char *TAG = "mesh";
 
@@ -66,6 +67,10 @@ static const char *TAG = "mesh";
 #define IE_PREQ 130
 #define IE_PREP 131
 #define HWMP_ELEMENT_TTL 31
+/* Secure mesh (mesh_sec.c): RSN element, MIC element, and the close reason for a bad MIC. */
+#define IE_RSN 48
+#define IE_MIC 140
+#define REASON_MESH_INVALID_GTK 58
 #define PLINK_OPEN 1
 #define PLINK_CONFIRM 2
 #define PLINK_CLOSE 3
@@ -160,6 +165,7 @@ typedef void (*mgmt_frame_builder_t)(struct umac_data *umacd, struct consbuf *bu
 struct mmpkt *mmint_build_mgmt_frame(struct umac_data *umacd, mgmt_frame_builder_t builder, void *params);
 void mmint_consbuf_append(struct consbuf *buf, const uint8_t *data, uint32_t len);
 void mmint_ie_s1g_capabilities_build_ap(struct umac_data *umacd, struct consbuf *buf);
+enum mmwlan_status mmint_mmdrv_set_param(uint16_t vif_id, int param_id, uint32_t value);
 struct mmpkt *mmint_umac_datapath_alloc_raw_tx_mmpkt(uint8_t pkt_class, uint32_t space_at_start, uint32_t space_at_end);
 enum mmwlan_status mmint_umac_datapath_tx_mgmt_frame_ap(struct umac_data *umacd, struct mmpkt *txbuf,
                                                         struct mmrc_rate *rate_override);
@@ -184,6 +190,9 @@ static char s_fw_version[32];
 static const struct mmwlan_s1g_channel *s_channel;
 
 static struct mesh_neighbour s_neighbours[MAX_NEIGHBOURS];
+/* The AID we give each neighbour: sent in our peering Confirm and used for its keys in the
+ * chip. Small numbers from 1 up, like a Linux mesh point hands out. */
+static uint16_t s_aid[MAX_NEIGHBOURS];
 static struct
 {
     int64_t timer_us;            /* 0: no timer running */
@@ -191,6 +200,42 @@ static struct
     uint32_t timeout_ms;
     int64_t open_at_us;          /* when to send our first open to this neighbour, 0: not planned */
 } s_plink[MAX_NEIGHBOURS];
+_Static_assert(MAX_NEIGHBOURS <= MESH_SEC_MAX_PEERS, "mesh_sec.c tracks one SAE instance per neighbour slot");
+/* Chip commands for keys and station records must not run under s_lock: the chip's reply is
+ * handled by the driver task, which also runs our receive hook, which takes s_lock. So the
+ * peering state machine only notes what is needed and the mesh task does it afterwards. */
+enum sec_op { SEC_OP_NONE = 0, SEC_OP_ESTABLISH, SEC_OP_LOST };
+static struct
+{
+    enum sec_op op;
+    uint16_t aid, llid, plid;
+} s_sec_pending[MAX_NEIGHBOURS];
+static bool s_secure;                 /* a mesh password is set: SAE, AMPE, CCMP */
+
+/* Encryption of the frame in flight, told to the chip in the transmit hook below. */
+static bool s_tx_sec_on;
+static uint8_t s_tx_sec_key_idx;
+static uint16_t s_tx_sec_aid;
+
+/* morselib's per-packet transmit metadata (src/internal/mmdrv.h), to set the encryption flag. */
+struct mmdrv_tx_metadata
+{
+    uint32_t timeout_abs_ms;
+    struct mmrc_rate_table rc_data;
+    uint8_t vif_id;
+    uint8_t key_idx;
+    uint8_t tid;
+    uint8_t tid_max_reorder_buf_size;
+    uint8_t flags;
+    uint8_t ampdu_mss;
+    uint8_t mmss_offset;
+    uint8_t status_flags;
+    uint8_t attempts;
+    uint8_t tail_padding;
+    uint16_t aid;
+    uint8_t enc;
+};
+#define MMDRV_TX_FLAG_HW_ENC 0x04
 static struct mesh_route s_routes[MAX_ROUTES];
 static struct
 {
@@ -207,6 +252,8 @@ static struct mesh_stats s_stats;
 static const uint8_t BROADCAST[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 static void mesh_config_ie(uint8_t out[9]);
 static int neighbour_index(const uint8_t *addr);
+static void sae_frame_process(const uint8_t *d, size_t len, int16_t rssi);
+static void send_auth_frame(const uint8_t *peer, const uint8_t *body, size_t len);
 
 struct rx_item
 {
@@ -360,6 +407,7 @@ enum mmwlan_status __wrap_mmint_mmdrv_add_if(uint16_t *vif_id, const uint8_t *ad
         chip_status = (int32_t)resp.status;
         *vif_id = resp.hdr.vif_id;
         s_mesh_vif = *vif_id;
+        mesh_sec_set_vif(s_mesh_vif);
         ESP_LOGI(TAG, "Mesh interface: %s (chip status %ld, vif %u)", st == MMWLAN_SUCCESS ? "created" : "REFUSED",
                  (long)chip_status, *vif_id);
         return st;
@@ -409,6 +457,17 @@ struct mmpkt *__wrap_mmint_umac_ap_get_beacon(struct umac_data *umacd)
                 ESP_LOGW(TAG, "No room in the beacon for the Mesh Configuration element");
             }
         }
+        /* A secure mesh advertises its RSN (CCMP, SAE) in every beacon too. */
+        if (s_secure)
+        {
+            uint8_t rsn[22];
+            size_t rl = mesh_sec_rsn_ie(rsn, sizeof(rsn));
+            if (rl > 0 && mmpkt_available_space_at_end(view) >= rl)
+            {
+                uint8_t *p = mmpkt_append(view, rl);
+                memcpy(p, rsn, rl);
+            }
+        }
         mmpkt_close(&view);
     }
     return beacon;
@@ -421,6 +480,13 @@ enum mmwlan_status __wrap_mmint_mmdrv_tx_frame(struct mmpkt *mmpkt, bool is_mgmt
     if (!TX_AS_MGMT && mmpkt != NULL && mmpkt == s_data_pkt_in_flight)
     {
         is_mgmt = false;
+        if (s_tx_sec_on)
+        {
+            struct mmdrv_tx_metadata *md = mmpkt_get_metadata(mmpkt).tx;
+            md->flags |= MMDRV_TX_FLAG_HW_ENC;
+            md->key_idx = s_tx_sec_key_idx;
+            md->aid = s_tx_sec_aid;
+        }
     }
     return __real_mmint_mmdrv_tx_frame(mmpkt, is_mgmt);
 }
@@ -486,7 +552,7 @@ static void mesh_config_ie(uint8_t out[9])
     out[3] = 1;   /* path selection metric: airtime */
     out[4] = 0;   /* congestion control: none */
     out[5] = 1;   /* synchronisation: neighbour offset */
-    out[6] = 0;   /* authentication: none (open) */
+    out[6] = s_secure ? 1 : 0;   /* authentication protocol: SAE, or none (open) */
     out[7] = (uint8_t)((peers > 63 ? 63 : peers) << 1);                 /* formation info: peerings */
     out[8] = (uint8_t)((peers < MAX_NEIGHBOURS ? 0x01 : 0) | 0x08);     /* accepting peerings, forwarding */
 }
@@ -516,9 +582,23 @@ static void neighbour_heard(const uint8_t *addr, int16_t rssi)
         slot = oldest;
         memset(slot, 0, sizeof(*slot));
         memcpy(slot->addr, addr, 6);
+        int si = (int)(slot - s_neighbours);
+        for (uint16_t aid = 1; aid <= MAX_NEIGHBOURS; aid++)
+        {
+            bool used = false;
+            for (int i = 0; i < MAX_NEIGHBOURS && !used; i++)
+            {
+                used = i != si && s_neighbours[i].beacons != 0 && s_aid[i] == aid;
+            }
+            if (!used)
+            {
+                s_aid[si] = aid;
+                break;
+            }
+        }
         char a[18];
         mac_str(addr, a);
-        ESP_LOGI(TAG, "Neighbour %s heard (rssi %d)", a, rssi);
+        ESP_LOGI(TAG, "Neighbour %s heard (rssi %d), aid %u", a, rssi, s_aid[si]);
     }
     slot->rssi = rssi;
     slot->beacons++;
@@ -665,6 +745,16 @@ static bool dedupe_seen(const uint8_t *src, uint32_t seq)
 /* ---------- Transmit ---------- */
 
 /* Sends one 4-address mesh data frame: receiver (next hop) ra, destination da, source sa. */
+/* The chip AID whose pairwise key encrypts frames to this neighbour, or -1 if there is none. */
+static int sec_tx_aid_for(const uint8_t *ra)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    int ni = neighbour_index(ra);
+    bool keyed = ni >= 0 && s_neighbours[ni].plink == MESH_PLINK_ESTAB && mesh_sec_peer_keyed(ni);
+    xSemaphoreGive(s_lock);
+    return keyed ? s_aid[ni] : -1;
+}
+
 static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t *sa, uint8_t ttl, uint32_t seq,
                             uint16_t ethertype, const uint8_t *payload, size_t payload_len)
 {
@@ -683,6 +773,30 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
         return ESP_ERR_INVALID_STATE;
     }
     int16_t rssi_hint = (ra[0] & 1) ? INT16_MIN : neighbour_rssi(ra);
+    /* Secure mesh: the chip encrypts with the pairwise key of the receiver (key 0, its AID)
+     * or our group key (key 1). No key yet for a unicast receiver: the frame does not go. */
+    bool sec_on = false;
+    uint8_t sec_key_idx = 0;
+    uint16_t sec_aid = 0;
+    if (s_secure)
+    {
+        if (group)
+        {
+            sec_on = true;
+            sec_key_idx = 1;
+        }
+        else
+        {
+            int kaid = sec_tx_aid_for(ra);
+            if (kaid < 0)
+            {
+                s_stats.tx_unkeyed++;
+                return ESP_ERR_INVALID_STATE;
+            }
+            sec_on = true;
+            sec_aid = (uint16_t)kaid;
+        }
+    }
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     struct mmpkt *pkt = mmint_umac_datapath_alloc_raw_tx_mmpkt(PKT_CLASS_DATA_TID0, 0, len);
     if (pkt == NULL)
@@ -703,16 +817,20 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
     uint8_t *p = mmpkt_append(view, len);
     memset(p, 0, hdr + 2);
     p[0] = 0x88;                     /* data, QoS data */
+    if (sec_on)
+    {
+        p[1] |= 0x40;                /* Protected: the chip adds the CCMP header and MIC */
+    }
     if (group)
     {
-        p[1] = 0x02;                 /* From DS: three addresses */
+        p[1] |= 0x02;                /* From DS: three addresses */
         memcpy(&p[4], da, 6);        /* address 1: the group */
         memcpy(&p[10], s_addr, 6);   /* address 2: transmitter, us */
         memcpy(&p[16], sa, 6);       /* address 3: original source */
     }
     else
     {
-        p[1] = 0x03;                 /* To DS + From DS: four addresses */
+        p[1] |= 0x03;                /* To DS + From DS: four addresses */
         memcpy(&p[4], ra, 6);        /* address 1: receiver, the next hop */
         memcpy(&p[10], s_addr, 6);   /* address 2: transmitter, us */
         memcpy(&p[16], da, 6);       /* address 3: final destination */
@@ -736,12 +854,16 @@ static esp_err_t send_frame(const uint8_t *ra, const uint8_t *da, const uint8_t 
 
     s_tx_rssi_hint = rssi_hint;
     s_tx_small = len < SMALL_FRAME;
+    s_tx_sec_on = sec_on;
+    s_tx_sec_key_idx = sec_key_idx;
+    s_tx_sec_aid = sec_aid;
     s_data_pkt_in_flight = pkt;
     int64_t t0 = esp_timer_get_time();
     enum mmwlan_status st = mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
     uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
     s_t_tx_us_sum += dt; s_t_tx_n++; if (dt > s_t_tx_us_max) s_t_tx_us_max = dt;
     s_data_pkt_in_flight = NULL;
+    s_tx_sec_on = false;
     xSemaphoreGive(s_tx_lock);
     if (st != MMWLAN_SUCCESS)
     {
@@ -852,6 +974,25 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
                  ((d[1] & 0x03) == 0x03 || ((d[1] & 0x03) == 0x02 && (d[4] & 1))))
         {
             consumed = true;
+            s_stats.rx_hook_data++;
+            if (d[1] & 0x40)
+            {
+                s_stats.rx_hook_prot++;
+                if (((struct rx_meta *)mmpkt_get_metadata(rxbuf).opaque)->flags & 0x01)
+                {
+                    s_stats.rx_hook_decrypted++;
+                }
+                static int dumped, dumped_ucast;
+                bool ucast = (d[4] & 1) == 0;
+                if ((ucast && dumped_ucast < 3) || (!ucast && dumped < 3))
+                {
+                    if (ucast) dumped_ucast++; else dumped++;
+                    ESP_LOGI(TAG, "Protected %s data frame (%lu bytes, chip decrypted %s), header and start of body:",
+                             ucast ? "unicast" : "group", (unsigned long)len,
+                             (((struct rx_meta *)mmpkt_get_metadata(rxbuf).opaque)->flags & 0x01) ? "yes" : "no");
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, d, len < 64 ? len : 64, ESP_LOG_INFO);
+                }
+            }
             const uint8_t *src = ((d[1] & 0x03) == 0x03) ? &d[24] : &d[16];
             bool peer_ok = true;
             if (s_cfg.require_peering)
@@ -863,6 +1004,17 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
             if (!peer_ok)
             {
                 s_stats.rx_unpeered++;
+            }
+            else if (s_secure && !(d[1] & 0x40))
+            {
+                static int shown;
+                if (shown < 3)
+                {
+                    shown++;
+                    ESP_LOGI(TAG, "Plaintext data frame from a secure peer (%lu bytes, rx flags %02x):", (unsigned long)len,
+                             ((struct rx_meta *)mmpkt_get_metadata(rxbuf).opaque)->flags);
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, d, len < 48 ? len : 48, ESP_LOG_INFO);
+                }
             }
             else if (!mac_eq(src, s_addr))   /* our own frame relayed back to us */
             {
@@ -879,6 +1031,23 @@ void __wrap_mmint_mmdrv_host_process_rx_frame(struct mmpkt *rxbuf, uint16_t chan
                         free(it);
                         s_stats.rx_queue_full++;
                     }
+                }
+            }
+        }
+        else if (ftype == 0 && subtype == 11 && s_secure && len >= 30 && d[24] == 3 && d[25] == 0)
+        {
+            consumed = true;   /* SAE Authentication frame: morselib's AP must not answer it */
+            struct rx_item *it = malloc(sizeof(*it) + len);
+            if (it != NULL)
+            {
+                it->len = (uint16_t)len;
+                it->rssi = rssi;
+                it->kind = 3;
+                memcpy(it->data, d, len);
+                if (xQueueSend(s_rx_queue, &it, 0) != pdTRUE)
+                {
+                    free(it);
+                    s_stats.rx_queue_full++;
                 }
             }
         }
@@ -931,6 +1100,7 @@ struct plink_frame_params
     uint8_t to[6];
     uint8_t action;
     uint16_t llid, plid, reason, aid;
+    int ni;
 };
 
 static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void *params)
@@ -943,50 +1113,61 @@ static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void
     memcpy(&hdr[16], s_addr, 6);                      /* address 3: us (mesh peering frames) */
     mmint_consbuf_append(buf, hdr, sizeof(hdr));
 
-    uint8_t fixed[6] = { CAT_SELF_PROTECTED, f->action, 0, 0, 0, 0 };
-    size_t fixed_len = 2;
-    if (f->action == PLINK_OPEN)
-    {
-        fixed_len = 4;                                /* capability */
-    }
-    else if (f->action == PLINK_CONFIRM)
-    {
-        fixed[4] = (uint8_t)f->aid;                   /* capability, then AID */
-        fixed[5] = (uint8_t)(f->aid >> 8);
-        fixed_len = 6;
-    }
-    mmint_consbuf_append(buf, fixed, fixed_len);
-
-    uint8_t mesh_id[2 + MESH_ID_MAX];
-    mesh_id[0] = IE_MESH_ID;
-    mesh_id[1] = (uint8_t)strlen(s_cfg.mesh_id);
-    memcpy(&mesh_id[2], s_cfg.mesh_id, mesh_id[1]);
-    mmint_consbuf_append(buf, mesh_id, 2 + mesh_id[1]);
-
+    /* The body up to the Mesh Peering Management element, assembled here so the first six
+     * bytes are known: a secure mesh binds them into the MIC. */
+    uint8_t body[2 + 4 + 22 + 2 + MESH_ID_MAX + 9 + 2 + 8 + MESH_SEC_PMKID_LEN];
+    size_t n = 0;
+    body[n++] = CAT_SELF_PROTECTED;
+    body[n++] = f->action;
     if (f->action != PLINK_CLOSE)
     {
-        uint8_t conf[9];
-        mesh_config_ie(conf);
-        mmint_consbuf_append(buf, conf, sizeof(conf));
+        body[n++] = s_secure ? 0x10 : 0;              /* capability: privacy when secure */
+        body[n++] = 0;
+        if (f->action == PLINK_CONFIRM)
+        {
+            body[n++] = (uint8_t)f->aid;
+            body[n++] = (uint8_t)(f->aid >> 8);
+        }
+        if (s_secure)
+        {
+            n += mesh_sec_rsn_ie(&body[n], sizeof(body) - n);
+        }
+    }
+    body[n++] = IE_MESH_ID;
+    body[n++] = (uint8_t)strlen(s_cfg.mesh_id);
+    memcpy(&body[n], s_cfg.mesh_id, strlen(s_cfg.mesh_id));
+    n += strlen(s_cfg.mesh_id);
+    if (f->action != PLINK_CLOSE)
+    {
+        mesh_config_ie(&body[n]);
+        n += 9;
     }
 
-    uint8_t mpm[2 + 8] = { IE_MESH_PEERING, 4, 0, 0, (uint8_t)f->llid, (uint8_t)(f->llid >> 8) };
-    size_t mpm_len = 6;
+    /* Mesh Peering Management: protocol (0 open, 1 AMPE), link ids, reason, chosen PMK. */
+    size_t mpm_at = n;
+    body[n++] = IE_MESH_PEERING;
+    body[n++] = 0;
+    body[n++] = s_secure ? 1 : 0;
+    body[n++] = 0;
+    body[n++] = (uint8_t)f->llid;
+    body[n++] = (uint8_t)(f->llid >> 8);
     if (f->action != PLINK_OPEN)
     {
-        mpm[6] = (uint8_t)f->plid;
-        mpm[7] = (uint8_t)(f->plid >> 8);
-        mpm[1] = 6;
-        mpm_len = 8;
+        body[n++] = (uint8_t)f->plid;
+        body[n++] = (uint8_t)(f->plid >> 8);
     }
     if (f->action == PLINK_CLOSE)
     {
-        mpm[8] = (uint8_t)f->reason;
-        mpm[9] = (uint8_t)(f->reason >> 8);
-        mpm[1] = 8;
-        mpm_len = 10;
+        body[n++] = (uint8_t)f->reason;
+        body[n++] = (uint8_t)(f->reason >> 8);
     }
-    mmint_consbuf_append(buf, mpm, mpm_len);
+    if (s_secure)
+    {
+        mesh_sec_pmkid(f->ni, &body[n]);
+        n += MESH_SEC_PMKID_LEN;
+    }
+    body[mpm_at + 1] = (uint8_t)(n - mpm_at - 2);
+    mmint_consbuf_append(buf, body, n);
 
     /* S1G Capabilities (217). The Morse Linux driver drops a Mesh Peering Confirm that
      * lacks one before mac80211 sees it (morse_mac_capabilities_validate); Linux mesh
@@ -994,6 +1175,17 @@ static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void
     if (f->action != PLINK_CLOSE)
     {
         mmint_ie_s1g_capabilities_build_ap(umacd, buf);
+    }
+
+    /* Secure mesh: the MIC element and the encrypted AMPE element close the frame. */
+    if (s_secure)
+    {
+        uint8_t tail[2 + 16 + 2 + 4 + 32 + 32 + 16 + 8 + 4];
+        int tl = mesh_sec_protect(f->ni, body, f->action == PLINK_OPEN, tail, sizeof(tail));
+        if (tl > 0)
+        {
+            mmint_consbuf_append(buf, tail, (uint32_t)tl);
+        }
     }
 }
 
@@ -1085,7 +1277,8 @@ static void hwmp_process(const uint8_t *d, size_t len)
 static void plink_send(int ni, uint8_t action, uint16_t reason)
 {
     struct mesh_neighbour *n = &s_neighbours[ni];
-    struct plink_frame_params f = { .action = action, .llid = n->llid, .plid = n->plid, .reason = reason, .aid = (uint16_t)(ni + 1) };
+    struct plink_frame_params f = { .action = action, .llid = n->llid, .plid = n->plid, .reason = reason,
+                                    .aid = s_aid[ni], .ni = ni };
     memcpy(f.to, n->addr, 6);
     struct mmpkt *pkt = mmint_build_mgmt_frame(s_umacd, build_plink_frame, &f);
     if (pkt == NULL)
@@ -1120,6 +1313,11 @@ static void plink_log(int ni, const char *what)
 static void plink_to_holding(int ni, uint16_t reason)
 {
     plink_send(ni, PLINK_CLOSE, reason);
+    if (s_secure)
+    {
+        s_sec_pending[ni].op = SEC_OP_LOST;
+        s_sec_pending[ni].aid = s_aid[ni];
+    }
     if (s_neighbours[ni].plink == MESH_PLINK_ESTAB)
     {
         s_stats.plink_lost++;
@@ -1135,6 +1333,13 @@ static void plink_established(int ni)
     s_plink[ni].timer_us = 0;
     s_stats.plink_established++;
     plink_log(ni, "PEERED");
+    if (s_secure)
+    {
+        s_sec_pending[ni].op = SEC_OP_ESTABLISH;
+        s_sec_pending[ni].aid = s_aid[ni];
+        s_sec_pending[ni].llid = s_neighbours[ni].llid;
+        s_sec_pending[ni].plid = s_neighbours[ni].plid;
+    }
 }
 
 /* Our side starts a peering: send Open, wait for their Open and Confirm. */
@@ -1165,6 +1370,8 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
     bool mesh_id_ok = false, conf_ok = action == PLINK_CLOSE;
     uint16_t llid = 0, plid = 0, reason = 0;
     bool have_mpm = false;
+    const uint8_t *mic = NULL, *pmkid = NULL;
+    size_t rest_len = 0;
     size_t i = body_at;
     while (i + 2 <= len)
     {
@@ -1187,14 +1394,37 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
         }
         else if (id == IE_MESH_CONFIG && l == 7)
         {
-            conf_ok = v[0] == 1 && v[1] == 1 && v[2] == 0 && v[3] == 1 && v[4] == 0;   /* same mesh profile, open */
+            /* same mesh profile; authentication SAE when we are secure, none when open */
+            conf_ok = v[0] == 1 && v[1] == 1 && v[2] == 0 && v[3] == 1 && v[4] == (s_secure ? 1 : 0);
         }
         else if (id == IE_MESH_PEERING && l >= 4)
         {
+            size_t base = l;
+            uint16_t proto = (uint16_t)(v[0] | (v[1] << 8));
+            if (s_secure)
+            {
+                if (proto != 1 || l < 4 + MESH_SEC_PMKID_LEN)
+                {
+                    break;   /* not an authenticated peering: have_mpm stays false */
+                }
+                base = l - MESH_SEC_PMKID_LEN;
+                pmkid = v + base;
+            }
+            else if (proto != 0)
+            {
+                break;
+            }
             have_mpm = true;
             llid = (uint16_t)(v[2] | (v[3] << 8));
-            if (l >= 6) plid = (uint16_t)(v[4] | (v[5] << 8));
-            if (l >= 8) reason = (uint16_t)(v[6] | (v[7] << 8));
+            if (base >= 6) plid = (uint16_t)(v[4] | (v[5] << 8));
+            if (base >= 8) reason = (uint16_t)(v[6] | (v[7] << 8));
+        }
+        else if (id == IE_MIC)
+        {
+            /* Everything after the MIC element is encrypted: stop parsing here. */
+            mic = v;
+            rest_len = len - (i + 2);
+            break;
         }
         i += 2 + l;
     }
@@ -1225,6 +1455,34 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
     }
     struct mesh_neighbour *n = &s_neighbours[ni];
     s_plink[ni].open_at_us = 0;
+    if (s_secure)
+    {
+        char a[18];
+        mac_str(src, a);
+        if (!mesh_sec_peer_accepted(ni))
+        {
+            xSemaphoreGive(s_lock);
+            ESP_LOGI(TAG, "Peering frame from %s before SAE finished, ignored", a);
+            return;
+        }
+        if (mic == NULL || rest_len < 16)
+        {
+            xSemaphoreGive(s_lock);
+            ESP_LOGW(TAG, "Unprotected peering frame from %s on a secure mesh, ignored", a);
+            return;
+        }
+        int res = mesh_sec_process_ampe(ni, &frame[24], action == PLINK_OPEN, pmkid, mic, rest_len);
+        if (res != 0)
+        {
+            ESP_LOGW(TAG, "Peering frame from %s rejected (%s)", a, res == -2 ? "bad MIC" : "bad AMPE element");
+            if (res == -2 && action == PLINK_OPEN && n->plink != MESH_PLINK_IDLE && n->plink != MESH_PLINK_HOLDING)
+            {
+                plink_to_holding(ni, REASON_MESH_INVALID_GTK);
+            }
+            xSemaphoreGive(s_lock);
+            return;
+        }
+    }
     switch (action)
     {
         case PLINK_OPEN:
@@ -1311,6 +1569,9 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
 static void plink_housekeeping(void)
 {
     int64_t now = esp_timer_get_time();
+    int sae_start[4];
+    uint8_t sae_addr[4][6];
+    int n_sae = 0;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int ni = 0; ni < MAX_NEIGHBOURS; ni++)
     {
@@ -1327,6 +1588,18 @@ static void plink_housekeeping(void)
         }
         if (s_cfg.require_peering && n->plink == MESH_PLINK_IDLE && s_plink[ni].open_at_us != 0 && now >= s_plink[ni].open_at_us)
         {
+            if (s_secure && !mesh_sec_peer_accepted(ni))
+            {
+                /* SAE first; finishing it opens the link. Look again later in case it failed. */
+                s_plink[ni].open_at_us = now + 15 * 1000 * 1000LL;
+                if (!mesh_sec_peer_busy(ni) && n_sae < 4)
+                {
+                    sae_start[n_sae] = ni;
+                    memcpy(sae_addr[n_sae], n->addr, 6);
+                    n_sae++;
+                }
+                continue;
+            }
             s_plink[ni].open_at_us = 0;
             plink_open(ni);
             continue;
@@ -1366,7 +1639,157 @@ static void plink_housekeeping(void)
                 break;
         }
     }
+#define SEC_PROBE 1   /* bench: a unicast test frame to each keyed peer every 5 s, to see the pairwise path work */
+    uint8_t probe_to[4][6];
+    int n_probe = 0;
+#if SEC_PROBE
+    static int64_t s_last_probe_us;
+    if (s_secure && now - s_last_probe_us > 5000000LL)
+    {
+        s_last_probe_us = now;
+        for (int ni = 0; ni < MAX_NEIGHBOURS && n_probe < 4; ni++)
+        {
+            if (s_neighbours[ni].beacons != 0 && s_neighbours[ni].plink == MESH_PLINK_ESTAB && mesh_sec_peer_keyed(ni))
+            {
+                memcpy(probe_to[n_probe++], s_neighbours[ni].addr, 6);
+            }
+        }
+    }
+#endif
     xSemaphoreGive(s_lock);
+    for (int i = 0; i < n_probe; i++)
+    {
+        static const uint8_t probe[16] = "mesh-sec-probe";
+        esp_err_t e = send_frame(probe_to[i], probe_to[i], s_addr, 1, ++s_seq, 0x88b5, probe, sizeof(probe));
+        ESP_LOGI(TAG, "Secure unicast probe sent: %s", esp_err_to_name(e));
+    }
+    /* SAE work happens without the table lock: the first Commit costs a second or two of maths. */
+    for (int i = 0; i < n_sae; i++)
+    {
+        mesh_sec_peer_start(sae_start[i], sae_addr[i]);
+    }
+    if (s_secure)
+    {
+        mesh_sec_housekeeping(now);
+    }
+}
+
+/* SAE finished with a neighbour: open the link (Linux does the same the moment it accepts). */
+static void sec_accepted(int ni)
+{
+    mesh_sec_ampe_init(ni);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    struct mesh_neighbour *n = &s_neighbours[ni];
+    if (n->beacons != 0 && (n->plink == MESH_PLINK_IDLE || n->plink == MESH_PLINK_HOLDING))
+    {
+        s_plink[ni].open_at_us = 0;
+        plink_open(ni);
+    }
+    xSemaphoreGive(s_lock);
+}
+
+/* An SAE Authentication frame from a neighbour (queued by the receive hook). */
+static void sae_frame_process(const uint8_t *d, size_t len, int16_t rssi)
+{
+    const uint8_t *src = &d[10];
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    int ni = neighbour_index(src);
+    xSemaphoreGive(s_lock);
+    if (ni < 0)
+    {
+        neighbour_heard(src, rssi);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        ni = neighbour_index(src);
+        xSemaphoreGive(s_lock);
+        if (ni < 0)
+        {
+            return;
+        }
+    }
+    enum mesh_sec_event ev = mesh_sec_rx_auth(ni, src, d, len);
+    if (ev == MESH_SEC_ACCEPTED)
+    {
+        sec_accepted(ni);
+    }
+    else if (ev == MESH_SEC_RESTART)
+    {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_neighbours[ni].plink != MESH_PLINK_IDLE && s_neighbours[ni].plink != MESH_PLINK_HOLDING)
+        {
+            plink_to_holding(ni, REASON_MESH_PEERING_CANCELLED);
+        }
+        xSemaphoreGive(s_lock);
+    }
+}
+
+/* Sends an SAE Authentication frame body to a peer (mesh_sec.c calls this). */
+struct auth_frame_params
+{
+    const uint8_t *to;
+    const uint8_t *body;
+    size_t len;
+};
+
+static void build_auth_frame(struct umac_data *umacd, struct consbuf *buf, void *params)
+{
+    (void)umacd;
+    const struct auth_frame_params *f = (const struct auth_frame_params *)params;
+    uint8_t hdr[24] = { 0 };
+    hdr[0] = 0xb0;                                    /* management, authentication */
+    memcpy(&hdr[4], f->to, 6);
+    memcpy(&hdr[10], s_addr, 6);
+    memcpy(&hdr[16], s_addr, 6);
+    mmint_consbuf_append(buf, hdr, sizeof(hdr));
+    mmint_consbuf_append(buf, f->body, (uint32_t)f->len);
+}
+
+static void send_auth_frame(const uint8_t *peer, const uint8_t *body, size_t len)
+{
+    struct auth_frame_params f = { .to = peer, .body = body, .len = len };
+    struct mmpkt *pkt = mmint_build_mgmt_frame(s_umacd, build_auth_frame, &f);
+    if (pkt == NULL)
+    {
+        return;
+    }
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    s_tx_rssi_hint = INT16_MIN;
+    mmint_umac_datapath_tx_mgmt_frame_ap(s_umacd, pkt, NULL);
+    xSemaphoreGive(s_tx_lock);
+}
+
+/* Runs the key and station-record work the peering state machine left behind, lock free. */
+static void sec_run_pending(void)
+{
+    if (!s_secure)
+    {
+        return;
+    }
+    for (int ni = 0; ni < MAX_NEIGHBOURS; ni++)
+    {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        enum sec_op op = s_sec_pending[ni].op;
+        uint16_t aid = s_sec_pending[ni].aid, llid = s_sec_pending[ni].llid, plid = s_sec_pending[ni].plid;
+        s_sec_pending[ni].op = SEC_OP_NONE;
+        xSemaphoreGive(s_lock);
+        if (op == SEC_OP_ESTABLISH)
+        {
+            if (mesh_sec_establish(ni, aid, llid, plid) != ESP_OK)
+            {
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                if (s_neighbours[ni].plink == MESH_PLINK_ESTAB)
+                {
+                    plink_to_holding(ni, REASON_MESH_PEERING_CANCELLED);
+                }
+                xSemaphoreGive(s_lock);
+                mesh_sec_peer_lost(ni, aid);
+                s_sec_pending[ni].op = SEC_OP_NONE;
+            }
+        }
+        else if (op == SEC_OP_LOST)
+        {
+            mesh_sec_peer_lost(ni, aid);
+        }
+    }
 }
 
 static void mesh_task(void *arg)
@@ -1378,17 +1801,26 @@ static void mesh_task(void *arg)
         if (xQueueReceive(s_rx_queue, &it, pdMS_TO_TICKS(50)) != pdTRUE || it == NULL)
         {
             plink_housekeeping();
+            sec_run_pending();
             continue;
         }
         if (it->kind == 1)
         {
             plink_process(it->data, it->len, it->rssi);
+            sec_run_pending();
             free(it);
             continue;
         }
         if (it->kind == 2)
         {
             hwmp_process(it->data, it->len);
+            free(it);
+            continue;
+        }
+        if (it->kind == 3)
+        {
+            sae_frame_process(it->data, it->len, it->rssi);
+            sec_run_pending();
             free(it);
             continue;
         }
@@ -1405,6 +1837,41 @@ static void mesh_task(void *arg)
         uint32_t hdr = four ? 30 : 24;
         uint32_t body_at = hdr + (qos ? 2 : 0);
         bool mesh_ctrl = qos && (d[hdr + 1] & 0x01);
+        /* Encrypted frames come up with the CCMP header and MIC still in place, body decrypted. */
+        if (d[1] & 0x40)
+        {
+            if (len < body_at + 16)
+            {
+                free(it);
+                continue;
+            }
+            if (s_secure)
+            {
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                int bni = neighbour_index(ta);
+                xSemaphoreGive(s_lock);
+                if (bni >= 0)
+                {
+                    mesh_sec_bench_decrypt(bni, d, len, body_at);
+                }
+            }
+            body_at += 8;
+            len -= 8;
+            static int shown;
+            if (shown < 3)
+            {
+                shown++;
+                ESP_LOGI(TAG, "Decrypted data frame from %02x:%02x:%02x:%02x:%02x:%02x, %lu bytes, body starts %02x %02x %02x %02x %02x %02x %02x %02x",
+                         ta[0], ta[1], ta[2], ta[3], ta[4], ta[5], (unsigned long)len, d[body_at], d[body_at + 1], d[body_at + 2],
+                         d[body_at + 3], d[body_at + 4], d[body_at + 5], d[body_at + 6], d[body_at + 7]);
+            }
+        }
+        else if (s_secure)
+        {
+            s_stats.rx_unprotected++;
+            free(it);
+            continue;
+        }
         uint8_t ttl = 1;
         uint32_t seq = 0;
         if (mesh_ctrl && len >= body_at + MESH_CTRL_LEN)
@@ -1532,6 +1999,7 @@ static void guard_set(bool armed)
 esp_err_t mesh_start(const struct mesh_config *cfg)
 {
     s_cfg = *cfg;
+    s_secure = s_cfg.password[0] != '\0';
     if (s_cfg.ttl == 0)
     {
         s_cfg.ttl = TTL_DEFAULT;
@@ -1601,10 +2069,23 @@ esp_err_t mesh_start(const struct mesh_config *cfg)
     }
     s_patch_mesh_id = true;
     mmwlan_ap_get_bssid(s_addr);
+    if (s_secure)
+    {
+        if (mesh_sec_init(s_addr, s_cfg.mesh_id, s_cfg.password, send_auth_frame) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Mesh password rejected (empty or longer than %d characters)", MESH_PASSWORD_MAX);
+            return ESP_ERR_INVALID_ARG;
+        }
+        mesh_sec_install_own_mgtk();
+        /* Bench: tell the chip in so many words that crypto is its job (parameter 30, the Linux
+         * driver's "crypto in host" switch), in case a mesh interface defaults the other way. */
+        enum mmwlan_status ps = mmint_mmdrv_set_param(s_mesh_vif, 30, 0);
+        ESP_LOGI(TAG, "Chip crypto-in-host parameter set to 0: status %d", (int)ps);
+    }
 
     if (s_cfg.l2_mode)
     {
-        xTaskCreate(mesh_task, "mesh", 6144, NULL, 6, NULL);
+        xTaskCreate(mesh_task, "mesh", 16384, NULL, 6, NULL);
         s_up = true;
         char la[18];
         mac_str(s_addr, la);
@@ -1631,7 +2112,7 @@ esp_err_t mesh_start(const struct mesh_config *cfg)
     esp_netif_set_mac(s_netif, s_addr);
     esp_netif_action_start(s_netif, NULL, 0, NULL);
 
-    xTaskCreate(mesh_task, "mesh", 6144, NULL, 6, NULL);
+    xTaskCreate(mesh_task, "mesh", 16384, NULL, 6, NULL);
     s_up = true;
     char a[18];
     mac_str(s_addr, a);
@@ -1641,6 +2122,11 @@ esp_err_t mesh_start(const struct mesh_config *cfg)
 }
 
 /* ---------- Status ---------- */
+
+bool mesh_is_secure(void)
+{
+    return s_secure;
+}
 
 bool mesh_is_up(void)
 {

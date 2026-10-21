@@ -177,6 +177,12 @@ static void status_task(void *arg)
         batadv_get_stats(&st);
         struct mesh_stats ms;
         mesh_get_stats(&ms);
+        if (mesh_is_secure())
+        {
+            ESP_LOGI(TAG, "---- secure: data frames seen %lu, encrypted %lu, chip decrypted %lu, plaintext refused %lu, unicast without key %lu",
+                     (unsigned long)ms.rx_hook_data, (unsigned long)ms.rx_hook_prot, (unsigned long)ms.rx_hook_decrypted,
+                     (unsigned long)ms.rx_unprotected, (unsigned long)ms.tx_unkeyed);
+        }
         ESP_LOGI(TAG, "---- mesh: %d neighbours (tx %lu rx %lu beacons heard %lu) | batman: %d neighbours, %d originators, %d clients | elp %lu/%lu ogm %lu/%lu/%lu ucast %lu/%lu/%lu bcast %lu/%lu/%lu",
                  nn, (unsigned long)ms.tx_frames, (unsigned long)ms.rx_frames, (unsigned long)ms.beacons_heard, bnn, no, ng,
                  (unsigned long)st.elp_tx, (unsigned long)st.elp_rx, (unsigned long)st.ogm_tx, (unsigned long)st.ogm_rx, (unsigned long)st.ogm_fwd,
@@ -218,6 +224,7 @@ static void bringup_task(void *arg)
     (void)arg;
     struct mesh_config mc = { 0 };
     strlcpy(mc.mesh_id, CONFIG_HOP_MESH_ID, sizeof(mc.mesh_id));
+    strlcpy(mc.password, CONFIG_HOP_MESH_PASSWORD, sizeof(mc.password));
     mc.s1g_chan = CONFIG_HOP_S1G_CHANNEL;
     mc.opclass = CONFIG_HOP_S1G_OPCLASS;
     mc.tx_dbm = CONFIG_HOP_TX_DBM;

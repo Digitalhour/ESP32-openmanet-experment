@@ -16,11 +16,13 @@
 #include "esp_err.h"
 #include "esp_netif.h"
 
+#define MESH_PASSWORD_MAX 63
 #define MESH_ID_MAX 32
 
 struct mesh_config
 {
     char mesh_id[MESH_ID_MAX + 1];
+    char password[MESH_PASSWORD_MAX + 1];   /* mesh password (SAE); empty for an open mesh */
     uint8_t s1g_chan;   /* S1G channel number, e.g. 26 */
     uint8_t opclass;    /* global operating class, e.g. 69 (2 MHz) */
     uint8_t tx_dbm;     /* cap, 0 = regulatory maximum */
@@ -75,6 +77,8 @@ struct mesh_stats
     uint32_t beacons_built, beacons_heard;
     uint32_t tx_by_mcs[8];      /* unicast frames sent at each starting MCS */
     uint32_t plink_open_tx, plink_confirm_tx, plink_close_tx, plink_rx, plink_established, plink_lost, rx_unpeered;
+    uint32_t rx_unprotected, tx_unkeyed;   /* secure mesh: plaintext data refused; unicast with no key yet */
+    uint32_t rx_hook_data, rx_hook_prot, rx_hook_decrypted;   /* data frames the chip handed us; encrypted; decrypted by it */
     uint32_t t_tx_avg_us, t_tx_max_us, t_rxq_avg_us, t_rxq_max_us;   /* time in the chip transmit call; receive queue wait */
 };
 
@@ -82,6 +86,7 @@ struct mesh_stats
  * up: set its IP address, then esp_netif_action_connected()). Call once. */
 esp_err_t mesh_start(const struct mesh_config *cfg);
 bool mesh_is_up(void);
+bool mesh_is_secure(void);
 /* l2_mode: send an Ethernet frame to the neighbour in its destination (or to all, if group). */
 esp_err_t mesh_send_ethernet(const uint8_t *frame, size_t len);
 esp_netif_t *mesh_netif(void);

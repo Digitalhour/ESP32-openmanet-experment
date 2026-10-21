@@ -4,6 +4,13 @@ menu "hopnode"
         string "Mesh name (802.11s Mesh ID)"
         default "OpenMANET-XIAO"
 
+    config HOP_MESH_PASSWORD
+        string "Mesh password (SAE); leave empty for an open mesh"
+        default ""
+        help
+            Set the same password on every node, including the Linux ones (the OpenWrt
+            mesh "key" with encryption sae). Up to 63 characters. Never printed.
+
     config HOP_S1G_CHANNEL
         int "HaLow channel (S1G channel number)"
         range 1 51
