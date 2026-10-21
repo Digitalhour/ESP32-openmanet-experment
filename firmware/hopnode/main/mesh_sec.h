@@ -44,12 +44,14 @@ void mesh_sec_housekeeping(int64_t now_us);
 /* Authenticated peering (AMPE). */
 void mesh_sec_ampe_init(int ni);
 void mesh_sec_pmkid(int ni, uint8_t out[MESH_SEC_PMKID_LEN]);
-/* Appends the MIC element and the encrypted AMPE element to a peering frame body. cat points
- * at the body (category, action, ...), at least 6 bytes of it. Returns bytes written or -1. */
-int mesh_sec_protect(int ni, const uint8_t *cat, bool is_open, uint8_t *out, size_t cap);
-/* Checks the MIC and decrypts the AMPE element of a received peering frame. mic points at
- * the 16-byte MIC value; rest_len covers it and everything after. 0 ok, -2 bad MIC, -1 other. */
-int mesh_sec_process_ampe(int ni, const uint8_t *cat, bool is_open, const uint8_t *chosen_pmk,
+/* Appends the MIC element and the encrypted AMPE element to a peering frame body. body is the
+ * frame body so far (category, action, everything up to where the MIC element goes), all of
+ * which may be bound into the MIC. Returns bytes written or -1. */
+int mesh_sec_protect(int ni, const uint8_t *body, size_t body_len, bool is_open, uint8_t *out, size_t cap);
+/* Checks the MIC and decrypts the AMPE element of a received peering frame. body is the frame
+ * body up to the MIC element (body_len bytes); mic points at the 16-byte MIC value; rest_len
+ * covers it and everything after. 0 ok, -2 bad MIC, -1 other. */
+int mesh_sec_process_ampe(int ni, const uint8_t *body, size_t body_len, bool is_open, const uint8_t *chosen_pmk,
                           const uint8_t *mic, size_t rest_len);
 /* Derives the pairwise key and loads the peer's keys into the chip. */
 esp_err_t mesh_sec_establish(int ni, uint16_t aid, uint16_t llid, uint16_t plid);
@@ -62,6 +64,3 @@ struct mesh_sec_stats
 };
 void mesh_sec_get_stats(struct mesh_sec_stats *out);
 
-/* Bench: CCMP-decrypt a received protected frame in software with the keys held for the peer,
- * to tell which key (if any) the sending chip used. Logs the result. */
-void mesh_sec_bench_decrypt(int ni, const uint8_t *frame, size_t len, size_t hdr_len);

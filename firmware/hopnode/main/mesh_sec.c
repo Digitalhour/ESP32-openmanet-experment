@@ -14,9 +14,10 @@
  * SAE itself, the EC maths and the SHA-256 KDF are hostap code that morselib already carries
  * (the esp-halow build prefixes it with mmint_). AES-SIV is written here on mbedtls, in the
  * form hostap uses: S2V-CMAC over the three associated-data vectors and the plaintext, then
- * AES-CTR. One Morse Micro detail matters for interop: their hostap binds only the first six
- * bytes of the frame body into the MIC (MESH_RSN_FRAME_MIC_OFFSET), not everything up to the
- * MIC element as upstream does.
+ * AES-CTR. One detail differs between hostap versions: upstream binds the whole frame body up
+ * to the MIC element into the MIC, the Morse SDK copy binds only its first six bytes
+ * (MESH_RSN_FRAME_MIC_OFFSET). A HaLowLink 1 on Morse 2.7.6 does it the upstream way. Both are
+ * accepted on receive, and whichever a peer uses is used back to it.
  *
  * Mode: hunting-and-pecking SAE (status 0), group 19, no PMF. That is what the Morse OpenWrt
  * mesh (HaLowLink, OpenMANET) runs; a hash-to-element Commit from a peer is logged and
@@ -133,16 +134,6 @@ enum mmwlan_status mmint_mmdrv_update_sta_state(uint16_t vif_id, uint16_t aid, c
 #define SEC_NO_PEER_MGTK 0   /* bench: 1 = do not load the peer's group key, to test the pairwise path alone */
 #endif
 
-/* Bench only: a short fingerprint of a key so two boards can be compared without printing it. */
-static uint32_t key_fp(const uint8_t *k, size_t n)
-{
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < n; i++)
-    {
-        h = (h ^ k[i]) * 16777619u;
-    }
-    return h;
-}
 
 /* ---------- state ---------- */
 
@@ -164,12 +155,15 @@ struct sec_peer
     uint8_t retries;
     bool ampe_ready;
     uint8_t my_nonce[NONCE_LEN], peer_nonce[NONCE_LEN];
-    uint8_t aek[AEK_LEN];
+    uint8_t aek[AEK_LEN];        /* AEK from the 32-byte PMK (upstream hostap) */
+    uint8_t aek64[AEK_LEN];      /* AEK from the PMK buffer zero-padded to 64 bytes (the SDK's hostap) */
+    uint8_t aek_mode;            /* 0 unknown, 1 aek, 2 aek64 */
     uint8_t mtk[MTK_LEN];
     uint8_t peer_mgtk[MGTK_LEN];
     uint64_t peer_mgtk_pn;
     bool have_peer_mgtk;
     bool keys_installed;
+    uint8_t aad_mode;            /* what the peer binds into the MIC: 0 unknown, 1 whole body, 2 six bytes */
 };
 
 static bool s_enabled;
@@ -373,6 +367,23 @@ esp_err_t mesh_sec_init(const uint8_t *own_addr, const char *mesh_id, const char
     esp_fill_random(s_mgtk, sizeof(s_mgtk));
     memset(s_peers, 0, sizeof(s_peers));
     s_enabled = true;
+    {
+        /* RFC 5297 A.1: deterministic authenticated encryption test vector. */
+        static const uint8_t key[32] = { 0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9, 0xf8, 0xf7, 0xf6, 0xf5, 0xf4, 0xf3, 0xf2, 0xf1, 0xf0,
+                                         0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff };
+        static const uint8_t ad[24] = { 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+                                        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27 };
+        static const uint8_t pt[14] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee };
+        static const uint8_t want[30] = { 0x85, 0x63, 0x2d, 0x07, 0xc6, 0xe8, 0xf3, 0x7f, 0x95, 0x0a, 0xcd, 0x32, 0x0a, 0x2e, 0xcc, 0x93,
+                                          0x40, 0xc0, 0x2b, 0x96, 0x90, 0xc4, 0xdc, 0x04, 0xda, 0xef, 0x7f, 0x6a, 0xfe, 0x5c };
+        uint8_t out[30], back[14];
+        const uint8_t *aad[1] = { ad };
+        const size_t aad_len[1] = { sizeof(ad) };
+        int e = siv_encrypt(key, pt, sizeof(pt), 1, aad, aad_len, out);
+        int d = siv_decrypt(key, want, sizeof(want), 1, aad, aad_len, back);
+        ESP_LOGI(TAG, "AES-SIV self test: encrypt %s, decrypt %s", (e == 0 && memcmp(out, want, 30) == 0) ? "OK" : "FAIL",
+                 (d == 0 && memcmp(back, pt, 14) == 0) ? "OK" : "FAIL");
+    }
     ESP_LOGI(TAG, "Mesh password set: SAE group %d, CCMP", SAE_GROUP);
     return ESP_OK;
 }
@@ -743,7 +754,7 @@ enum mesh_sec_event mesh_sec_rx_auth(int ni, const uint8_t *addr, const uint8_t 
                     mmint_sae_clear_temp_data(p->sae);
                     p->retries = 0;
                     s_stats.sae_done++;
-                    ESP_LOGI(TAG, "SAE with %s: done, PMK agreed", a);
+                    ESP_LOGI(TAG, "SAE with %s: done, PMK agreed (pmk_len %u, group %d)", a, (unsigned)p->sae->pmk_len, p->sae->group);
                     return MESH_SEC_ACCEPTED;
                 }
                 sae_fail(p, "Confirm did not verify (different password?)");
@@ -822,6 +833,7 @@ void mesh_sec_ampe_init(int ni)
     memcpy(ctx + 4, lo, 6);
     memcpy(ctx + 10, hi, 6);
     mmint_sha256_prf(p->sae->pmk, 32, "AEK Derivation", ctx, sizeof(ctx), p->aek, AEK_LEN);
+    mmint_sha256_prf(p->sae->pmk, 64, "AEK Derivation", ctx, sizeof(ctx), p->aek64, AEK_LEN);
     p->ampe_ready = true;
 }
 
@@ -840,15 +852,27 @@ void mesh_sec_pmkid(int ni, uint8_t out[MESH_SEC_PMKID_LEN])
 
 #define AMPE_FIXED (4 + NONCE_LEN + NONCE_LEN)
 #define AMPE_GTKDATA (MGTK_LEN + KEY_RSC_LEN + 4)
-#define MIC_OFFSET 6   /* Morse hostap: bytes of the body bound into the MIC */
+#define AAD_WHOLE_BODY 1
+#define AAD_SIX_BYTES 2
+#define MIC_OFFSET 6   /* Morse SDK hostap: bytes of the body bound into the MIC */
 
-int mesh_sec_protect(int ni, const uint8_t *cat, bool is_open, uint8_t *out, size_t cap)
+static size_t aad_body_len(uint8_t mode, size_t body_len)
+{
+    if (mode == AAD_SIX_BYTES)
+    {
+        return body_len < MIC_OFFSET ? body_len : MIC_OFFSET;
+    }
+    return body_len;
+}
+
+int mesh_sec_protect(int ni, const uint8_t *body, size_t body_len, bool is_open, uint8_t *out, size_t cap)
 {
     struct sec_peer *p = peer(ni);
     if (p == NULL || !p->ampe_ready)
     {
         return -1;
     }
+    const uint8_t *cat = body;
     size_t ampe_len = AMPE_FIXED + (is_open ? AMPE_GTKDATA : 0);
     size_t total = 2 + 16 + 2 + ampe_len;
     if (cap < total)
@@ -875,10 +899,11 @@ int mesh_sec_protect(int ni, const uint8_t *cat, bool is_open, uint8_t *out, siz
         q += 4;
     }
     const uint8_t *aad[3] = { s_own, p->addr, cat };
-    const size_t aad_len[3] = { 6, 6, MIC_OFFSET };
+    const size_t aad_len[3] = { 6, 6, aad_body_len(p->aad_mode ? p->aad_mode : AAD_WHOLE_BODY, body_len) };
+    const uint8_t *aek = p->aek_mode == 2 ? p->aek64 : p->aek;
     out[0] = 140;                     /* MIC */
     out[1] = 16;
-    if (siv_encrypt(p->aek, plain, 2 + ampe_len, 3, aad, aad_len, out + 2))
+    if (siv_encrypt(aek, plain, 2 + ampe_len, 3, aad, aad_len, out + 2))
     {
         return -1;
     }
@@ -886,9 +911,10 @@ int mesh_sec_protect(int ni, const uint8_t *cat, bool is_open, uint8_t *out, siz
     return (int)total;
 }
 
-int mesh_sec_process_ampe(int ni, const uint8_t *cat, bool is_open, const uint8_t *chosen_pmk, const uint8_t *mic,
-                          size_t rest_len)
+int mesh_sec_process_ampe(int ni, const uint8_t *body, size_t body_len, bool is_open, const uint8_t *chosen_pmk,
+                          const uint8_t *mic, size_t rest_len)
 {
+    const uint8_t *cat = body;
     struct sec_peer *p = peer(ni);
     if (p == NULL || !p->ampe_ready || p->sae == NULL || p->sae->state != SAE_ACCEPTED)
     {
@@ -909,8 +935,37 @@ int mesh_sec_process_ampe(int ni, const uint8_t *cat, bool is_open, const uint8_
         return -1;
     }
     const uint8_t *aad[3] = { p->addr, s_own, cat };
-    const size_t aad_len[3] = { 6, 6, MIC_OFFSET };
-    int r = siv_decrypt(p->aek, mic, rest_len, 3, aad, aad_len, plain);
+    size_t aad_len[3] = { 6, 6, 0 };
+    /* Try the peer's known binding and key first, else every combination, and remember what
+     * worked: whole body or six bytes in the MIC, AEK from a 32-byte or a 64-byte PMK buffer. */
+    uint8_t modes[2] = { p->aad_mode ? p->aad_mode : AAD_WHOLE_BODY, p->aad_mode ? 0 : AAD_SIX_BYTES };
+    uint8_t keys[2] = { p->aek_mode ? p->aek_mode : 1, p->aek_mode ? 0 : 2 };
+    int r = -2;
+    for (int k = 0; k < 2 && r != 0; k++)
+    {
+        if (keys[k] == 0)
+        {
+            break;
+        }
+        for (int m = 0; m < 2 && r != 0; m++)
+        {
+            if (modes[m] == 0)
+            {
+                break;
+            }
+            aad_len[2] = aad_body_len(modes[m], body_len);
+            r = siv_decrypt(keys[k] == 2 ? p->aek64 : p->aek, mic, rest_len, 3, aad, aad_len, plain);
+            if (r == 0 && (p->aad_mode != modes[m] || p->aek_mode != keys[k]))
+            {
+                p->aad_mode = modes[m];
+                p->aek_mode = keys[k];
+                char a[18];
+                mac_str(p->addr, a);
+                ESP_LOGI(TAG, "%s: peering MIC binds %s, AEK from a %d-byte PMK buffer", a,
+                         modes[m] == AAD_WHOLE_BODY ? "the whole body" : "six bytes", keys[k] == 2 ? 64 : 32);
+            }
+        }
+    }
     if (r != 0)
     {
         free(plain);
@@ -1007,9 +1062,6 @@ esp_err_t mesh_sec_establish(int ni, uint16_t aid, uint16_t llid, uint16_t plid)
         ESP_LOGE(TAG, "Chip refused the pairwise key for %s (aid %u, status %d)", a, aid, (int)st);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "Key fingerprints for %s: pairwise %08lx, their group %08lx (pn %llu), our group %08lx",
-             a, (unsigned long)key_fp(p->mtk, MTK_LEN), (unsigned long)key_fp(p->peer_mgtk, MGTK_LEN),
-             (unsigned long long)p->peer_mgtk_pn, (unsigned long)key_fp(s_mgtk, MGTK_LEN));
     if (p->have_peer_mgtk && !SEC_NO_PEER_MGTK)
     {
         struct mmdrv_key_conf g = { .is_pairwise = false, .tx_pn = p->peer_mgtk_pn, .length = MGTK_LEN,
@@ -1070,86 +1122,4 @@ bool mesh_sec_peer_keyed(int ni)
 void mesh_sec_get_stats(struct mesh_sec_stats *out)
 {
     *out = s_stats;
-}
-
-
-/* ---------- bench: software CCMP ---------- */
-
-static int ccmp_try(const uint8_t key[16], const uint8_t *frame, size_t len, size_t hdr_len)
-{
-    /* hdr_len: MAC header incl. QoS. CCMP header follows (8), then ciphertext, then MIC (8). */
-    if (len < hdr_len + 8 + 8)
-    {
-        return -1;
-    }
-    const uint8_t *ccmp = frame + hdr_len;
-    size_t data_len = len - hdr_len - 16;
-    uint8_t nonce[13];
-    nonce[0] = (uint8_t)(frame[hdr_len - 2] & 0x0f);   /* priority: TID */
-    memcpy(nonce + 1, frame + 10, 6);                    /* A2 */
-    nonce[7] = ccmp[7];
-    nonce[8] = ccmp[6];
-    nonce[9] = ccmp[5];
-    nonce[10] = ccmp[4];
-    nonce[11] = ccmp[1];
-    nonce[12] = ccmp[0];
-    uint8_t aad[32];
-    size_t al = 0;
-    aad[al++] = (uint8_t)(frame[0] & 0x8f);              /* FC: subtype bits masked, QoS bit kept */
-    aad[al++] = (uint8_t)((frame[1] & 0xc7) | 0x40);     /* retry, pwr mgt, more data masked; protected set */
-    memcpy(aad + al, frame + 4, 18);                     /* A1 A2 A3 */
-    al += 18;
-    aad[al++] = (uint8_t)(frame[22] & 0x0f);             /* SC: fragment only */
-    aad[al++] = 0;
-    bool a4 = (frame[1] & 0x03) == 0x03;
-    if (a4)
-    {
-        memcpy(aad + al, frame + 24, 6);
-        al += 6;
-    }
-    aad[al++] = (uint8_t)(frame[hdr_len - 2] & 0x0f);   /* QoS: TID only */
-    aad[al++] = 0;
-    uint8_t *out = malloc(data_len);
-    if (out == NULL)
-    {
-        return -1;
-    }
-    mbedtls_ccm_context ctx;
-    mbedtls_ccm_init(&ctx);
-    int r = mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
-    if (r == 0)
-    {
-        r = mbedtls_ccm_auth_decrypt(&ctx, data_len, nonce, sizeof(nonce), aad, al, ccmp + 8, out, ccmp + 8 + data_len, 8);
-    }
-    mbedtls_ccm_free(&ctx);
-    int ok = (r == 0) ? 0 : -2;
-    if (ok == 0)
-    {
-        ESP_LOGI(TAG, "  plaintext starts %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x", out[0], out[1], out[2], out[3],
-                 out[4], out[5], out[6], out[7], out[8], out[9]);
-    }
-    free(out);
-    return ok;
-}
-
-void mesh_sec_bench_decrypt(int ni, const uint8_t *frame, size_t len, size_t hdr_len)
-{
-    struct sec_peer *p = peer(ni);
-    if (p == NULL || !p->keys_installed)
-    {
-        return;
-    }
-    static int tries;
-    if (tries >= 6)
-    {
-        return;
-    }
-    tries++;
-    uint8_t keyid = (uint8_t)(frame[hdr_len + 3] >> 6);
-    bool ucast = (frame[4] & 1) == 0;
-    int a = ccmp_try(p->mtk, frame, len, hdr_len);
-    int b = ccmp_try(p->peer_mgtk, frame, len, hdr_len);
-    int c = ccmp_try(s_mgtk, frame, len, hdr_len);
-    ESP_LOGI(TAG, "Software CCMP on a %s frame (key id %u): pairwise %s, their group %s, our group %s",
-             ucast ? "unicast" : "group", keyid, a == 0 ? "OK" : "fail", b == 0 ? "OK" : "fail", c == 0 ? "OK" : "fail");
 }

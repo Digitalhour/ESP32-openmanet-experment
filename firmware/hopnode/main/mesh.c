@@ -1095,6 +1095,14 @@ const char *mesh_plink_state_name(enum mesh_plink_state st)
     }
 }
 
+/* morselib's construction buffer (src/common/consbuf.h): the frame being built. */
+struct consbuf
+{
+    uint8_t *buf;
+    uint32_t buf_size;
+    uint32_t offset;
+};
+
 struct plink_frame_params
 {
     uint8_t to[6];
@@ -1177,14 +1185,25 @@ static void build_plink_frame(struct umac_data *umacd, struct consbuf *buf, void
         mmint_ie_s1g_capabilities_build_ap(umacd, buf);
     }
 
-    /* Secure mesh: the MIC element and the encrypted AMPE element close the frame. */
+    /* Secure mesh: the MIC element and the encrypted AMPE element close the frame. The MIC
+     * may bind the whole body so far, which is what the construction buffer now holds. */
     if (s_secure)
     {
         uint8_t tail[2 + 16 + 2 + 4 + 32 + 32 + 16 + 8 + 4];
-        int tl = mesh_sec_protect(f->ni, body, f->action == PLINK_OPEN, tail, sizeof(tail));
-        if (tl > 0)
+        if (buf->buf == NULL)
         {
-            mmint_consbuf_append(buf, tail, (uint32_t)tl);
+            /* morselib's sizing pass: no buffer yet, only the length counts. */
+            mmint_consbuf_append(buf, tail, (uint32_t)(2 + 16 + 2 + 4 + 32 + 32 + (f->action == PLINK_OPEN ? 28 : 0)));
+        }
+        else
+        {
+            const uint8_t *whole = buf->buf + sizeof(hdr);
+            size_t whole_len = buf->offset - sizeof(hdr);
+            int tl = mesh_sec_protect(f->ni, whole, whole_len, f->action == PLINK_OPEN, tail, sizeof(tail));
+            if (tl > 0)
+            {
+                mmint_consbuf_append(buf, tail, (uint32_t)tl);
+            }
         }
     }
 }
@@ -1371,7 +1390,7 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
     uint16_t llid = 0, plid = 0, reason = 0;
     bool have_mpm = false;
     const uint8_t *mic = NULL, *pmkid = NULL;
-    size_t rest_len = 0;
+    size_t rest_len = 0, mic_at = 0;
     size_t i = body_at;
     while (i + 2 <= len)
     {
@@ -1423,6 +1442,7 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
         {
             /* Everything after the MIC element is encrypted: stop parsing here. */
             mic = v;
+            mic_at = i;
             rest_len = len - (i + 2);
             break;
         }
@@ -1471,10 +1491,11 @@ static void plink_process(const uint8_t *frame, size_t len, int16_t rssi)
             ESP_LOGW(TAG, "Unprotected peering frame from %s on a secure mesh, ignored", a);
             return;
         }
-        int res = mesh_sec_process_ampe(ni, &frame[24], action == PLINK_OPEN, pmkid, mic, rest_len);
+        int res = mesh_sec_process_ampe(ni, &frame[24], mic_at - 24, action == PLINK_OPEN, pmkid, mic, rest_len);
         if (res != 0)
         {
             ESP_LOGW(TAG, "Peering frame from %s rejected (%s)", a, res == -2 ? "bad MIC" : "bad AMPE element");
+
             if (res == -2 && action == PLINK_OPEN && n->plink != MESH_PLINK_IDLE && n->plink != MESH_PLINK_HOLDING)
             {
                 plink_to_holding(ni, REASON_MESH_INVALID_GTK);
@@ -1639,7 +1660,7 @@ static void plink_housekeeping(void)
                 break;
         }
     }
-#define SEC_PROBE 1   /* bench: a unicast test frame to each keyed peer every 5 s, to see the pairwise path work */
+#define SEC_PROBE 0   /* bench: a unicast test frame to each keyed peer every 5 s, to see the pairwise path work */
     uint8_t probe_to[4][6];
     int n_probe = 0;
 #if SEC_PROBE
@@ -1844,16 +1865,6 @@ static void mesh_task(void *arg)
             {
                 free(it);
                 continue;
-            }
-            if (s_secure)
-            {
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                int bni = neighbour_index(ta);
-                xSemaphoreGive(s_lock);
-                if (bni >= 0)
-                {
-                    mesh_sec_bench_decrypt(bni, d, len, body_at);
-                }
             }
             body_at += 8;
             len -= 8;
@@ -2077,10 +2088,6 @@ esp_err_t mesh_start(const struct mesh_config *cfg)
             return ESP_ERR_INVALID_ARG;
         }
         mesh_sec_install_own_mgtk();
-        /* Bench: tell the chip in so many words that crypto is its job (parameter 30, the Linux
-         * driver's "crypto in host" switch), in case a mesh interface defaults the other way. */
-        enum mmwlan_status ps = mmint_mmdrv_set_param(s_mesh_vif, 30, 0);
-        ESP_LOGI(TAG, "Chip crypto-in-host parameter set to 0: status %d", (int)ps);
     }
 
     if (s_cfg.l2_mode)
